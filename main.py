@@ -1,13 +1,11 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 import asyncio
 import logging
-import random
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.bot import DefaultBotProperties
 from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean, DateTime, Enum
 from sqlalchemy.ext.declarative import declarative_base
@@ -87,24 +85,50 @@ def cancel_kb():
         [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]
     ])
 
-def tag_choice_kb():
-    tags = {
-        "Развлечения": ["Видеоигры", "Фильмы", "Книги", "Музыка", "Рисование", "Настольные игры"],
-        "Активности": ["Спорт", "Походы", "Велоспорт", "Плавание", "Йога", "Танцы"],
-        "Путешествия": ["Путешествия", "Кемпинг", "Пляж", "Горы", "Города", "Природа"],
-        "Интеллект": ["Наука", "IT/Технологии", "Психология", "История", "Языки", "Философия"],
-        "Еда": ["Кулинария", "Кофе", "Вино", "Фастфуд", "Суши", "ЗОЖ"],
-        "Личность": ["Лидер", "Наблюдатель", "Эмпат", "Домосед", "Тусовщик", "Дипломат"]
+# ========== ДАННЫЕ ДЛЯ ТЕГОВ-КВИЗА ==========
+TAG_QUESTIONS = [
+    {
+        "category": "Развлечения",
+        "question": "🎮 Как ты обычно проводишь свободное время?",
+        "tags": ["Видеоигры", "Фильмы", "Книги", "Музыка", "Рисование", "Настольные игры"]
+    },
+    {
+        "category": "Активности",
+        "question": "🏃 Что из этого тебя заряжает энергией?",
+        "tags": ["Спорт", "Походы", "Велоспорт", "Плавание", "Йога", "Танцы"]
+    },
+    {
+        "category": "Путешествия",
+        "question": "🌍 Где бы ты сейчас хотел оказаться?",
+        "tags": ["Путешествия", "Кемпинг", "Пляж", "Горы", "Города", "Природа"]
+    },
+    {
+        "category": "Интеллект",
+        "question": "🧠 Какая тема вызывает у тебя живой интерес?",
+        "tags": ["Наука", "IT/Технологии", "Психология", "История", "Языки", "Философия"]
+    },
+    {
+        "category": "Еда",
+        "question": "🍽️ Что из этого ты предпочитаешь?",
+        "tags": ["Кулинария", "Кофе", "Вино", "Фастфуд", "Суши", "ЗОЖ"]
+    },
+    {
+        "category": "Личность",
+        "question": "🧑‍🤝‍🧑 Как бы ты описал себя в компании?",
+        "tags": ["Лидер", "Наблюдатель", "Эмпат", "Домосед", "Тусовщик", "Дипломат"]
     }
-    keyboard = []
-    for category, tag_list in tags.items():
-        row = [InlineKeyboardButton(text=tag, callback_data=f"tag_{category}_{tag}") for tag in tag_list]
-        keyboard.append(row)
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+]
+
+def tag_question_kb(tags):
+    """Клавиатура для выбора тега в рамках вопроса"""
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t, callback_data=f"tag_{t}")] for t in tags
+    ] + [[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]])
+    return kb
 
 # ========== ТЕКСТЫ ==========
 WELCOME = """
-🏰 Добро пожаловать в **Резонанс**!
+🏰 Добро пожаловать в **Рейд Сердец**!
 
 Ты — искатель приключений в мире, где знакомства становятся частью RPG-приключения.
 
@@ -142,9 +166,9 @@ class RegForm(StatesGroup):
     username = State()
     age = State()
     city = State()
-    tags = State()
+    tag_step = State()
 
-# ========== КВИЗ (7 ВОПРОСОВ) ==========
+# ========== КВИЗ ==========
 QUESTIONS = [
     {
         "text": "Ты заходишь в переполненную комнату. Твои действия?",
@@ -215,39 +239,11 @@ QUESTIONS = [
     }
 ]
 
-# ========== АВТОМАТИЧЕСКИЙ ПОДБОР ПРОКСИ ==========
-PROXY_LIST = [
-    "http://91.107.242.226:8080",
-    "http://45.155.68.129:8080",
-    "http://195.206.226.226:8080",
-    "socks5://91.107.242.226:1080",
-    "socks5://45.155.68.129:1080",
-]
-
-async def create_bot_with_proxy():
-    for proxy in PROXY_LIST:
-        try:
-            session = AiohttpSession(proxy=proxy)
-            bot = Bot(token=BOT_TOKEN, session=session, default=DefaultBotProperties())
-            await bot.get_me()
-            print(f"✅ Прокси работает: {proxy}")
-            return bot
-        except Exception as e:
-            print(f"❌ Прокси {proxy} не работает: {e}")
-            continue
-    print("⚠️ Все прокси отвалились, пробую без прокси...")
-    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties())
-    try:
-        await bot.get_me()
-        print("✅ Работает без прокси!")
-        return bot
-    except Exception as e:
-        print(f"❌ И без прокси не работает: {e}")
-        return None
-
 # ========== БОТ ==========
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties())
 dp = Dispatcher()
 
+# ---------- СТАРТ ----------
 @dp.message(Command("start"))
 async def start(msg: Message, state: FSMContext):
     await state.clear()
@@ -258,6 +254,7 @@ async def start(msg: Message, state: FSMContext):
     else:
         await msg.answer(WELCOME, reply_markup=class_choice())
 
+# ---------- КВИЗ ----------
 @dp.callback_query(F.data == "class_start")
 async def start_quiz(call: CallbackQuery, state: FSMContext):
     await state.update_data(quiz_step=0, scores={})
@@ -312,6 +309,7 @@ async def finish_quiz(message, state):
     await message.answer("📝 Введи **никнейм** (2–30 символов):", reply_markup=cancel_kb())
     await state.set_state(RegForm.username)
 
+# ---------- АНКЕТА ----------
 @dp.message(RegForm.username)
 async def set_username(msg: Message, state: FSMContext):
     name = msg.text.strip()
@@ -342,25 +340,45 @@ async def set_age(msg: Message, state: FSMContext):
 @dp.message(RegForm.city)
 async def set_city(msg: Message, state: FSMContext):
     await state.update_data(city=msg.text.strip())
-    await msg.answer("🏷️ Выбери теги (по одному из каждой категории):", reply_markup=tag_choice_kb())
-    await state.set_state(RegForm.tags)
+    await state.update_data(selected_tags={})
+    await state.set_state(RegForm.tag_step)
+    await ask_tag_question(msg, state, 0)
+
+# ---------- КВИЗ ПО ТЕГАМ ----------
+async def ask_tag_question(message, state, step):
+    if step >= len(TAG_QUESTIONS):
+        await finish_registration(message, state)
+        return
+    q_data = TAG_QUESTIONS[step]
+    kb = tag_question_kb(q_data["tags"])
+    await message.answer(
+        f"{q_data['question']}\n\nВыбери один вариант:",
+        reply_markup=kb
+    )
+    await state.update_data(tag_step=step)
 
 @dp.callback_query(F.data.startswith("tag_"))
-async def set_tag(call: CallbackQuery, state: FSMContext):
+async def handle_tag_answer(call: CallbackQuery, state: FSMContext):
+    tag = call.data.split("_", 1)[1]
     data = await state.get_data()
-    tags = data.get("tags", {})
-    category, tag = call.data.split("_")[1], "_".join(call.data.split("_")[2:])
-    tags[category] = tag
-    await state.update_data(tags=tags)
-    categories = ["Развлечения", "Активности", "Путешествия", "Интеллект", "Еда", "Личность"]
-    if len(tags) >= len(categories):
+    step = data.get("tag_step", 0)
+    selected = data.get("selected_tags", {})
+    q_data = TAG_QUESTIONS[step]
+    selected[q_data["category"]] = tag
+    await state.update_data(selected_tags=selected)
+    next_step = step + 1
+    if next_step >= len(TAG_QUESTIONS):
         await finish_registration(call.message, state)
     else:
-        await call.message.edit_text(f"✅ Выбрано {len(tags)} из {len(categories)}. Продолжай:", reply_markup=tag_choice_kb())
+        await ask_tag_question(call.message, state, next_step)
     await call.answer()
 
 async def finish_registration(message, state):
     data = await state.get_data()
+    selected_tags = data.get("selected_tags", {})
+    if len(selected_tags) != len(TAG_QUESTIONS):
+        await message.answer("❌ Выбери теги для всех категорий!")
+        return
     with SessionLocal() as session_db:
         user = User(
             tg_id=message.from_user.id,
@@ -372,12 +390,22 @@ async def finish_registration(message, state):
         )
         session_db.add(user)
         session_db.flush()
-        for category, tag in data.get("tags", {}).items():
+        for category, tag in selected_tags.items():
             session_db.add(UserTag(user_id=user.id, category=category, tag=tag))
         session_db.commit()
     await state.clear()
-    await message.edit_text(f"✅ Регистрация завершена! Добро пожаловать, {data['username']}!", reply_markup=main_menu())
+    await message.answer(
+        f"✅ Регистрация завершена! Добро пожаловать, {data['username']}! 🎉",
+        reply_markup=main_menu()
+    )
 
+@dp.callback_query(F.data == "cancel")
+async def cancel_registration(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.message.edit_text("❌ Регистрация отменена. Напиши /start заново.")
+    await call.answer()
+
+# ---------- ПРОФИЛЬ ----------
 @dp.callback_query(F.data == "profile")
 async def profile(call: CallbackQuery):
     with SessionLocal() as session_db:
@@ -416,12 +444,7 @@ async def find_match(call: CallbackQuery):
     await call.message.answer("⚔️ Поиск напарника скоро появится! 🚀")
     await call.answer()
 
-@dp.callback_query(F.data == "cancel")
-async def cancel(call: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await call.message.edit_text("❌ Отменено. Напиши /start.")
-    await call.answer()
-
+# ---------- РЕДАКТИРОВАНИЕ ----------
 @dp.message(Command("setname"))
 async def setname(msg: Message):
     name = msg.text.replace("/setname", "").strip()
@@ -472,14 +495,9 @@ async def setcity(msg: Message):
 
 # ========== ЗАПУСК ==========
 async def main():
-    bot = await create_bot_with_proxy()
-    if not bot:
-        print("❌ Не удалось подключиться к Telegram.")
-        return
     print("✅ База данных готова!")
-    print("🚀 Бот 'Резонанс' запущен!")
+    print("🚀 Бот 'Рейд Сердец' запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
-     
+    asyncio.run(main())﻿
