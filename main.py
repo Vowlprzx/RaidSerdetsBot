@@ -99,8 +99,8 @@ TAG_QUESTIONS = [
     },
     {
         "category": "Путешествия",
-        "question": "🌍 Где бы ты сейчас хотел оказаться?",
-        "tags": ["Путешествия", "Кемпинг", "Пляж", "Горы", "Города", "Природа"]
+        "question": "🌍 Если бы у тебя был портал в любую точку мира — куда бы ты шагнул?",
+        "tags": ["✈️ Новое неизведанное", "🏕️ Лес, костёр и звёзды", "🏖️ Тёплый пляж", "🏔️ Горы и тишина", "🏙️ Шумный мегаполис", "🌿 Дикая природа"]
     },
     {
         "category": "Интеллект",
@@ -119,9 +119,9 @@ TAG_QUESTIONS = [
     }
 ]
 
-def tag_question_kb(tags):
+def tag_question_kb(tags, step):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=t, callback_data=f"tag_{t}")] for t in tags
+        [InlineKeyboardButton(text=t, callback_data=f"tag_{step}_{i}")] for i, t in enumerate(tags)
     ] + [[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]])
     return kb
 
@@ -167,7 +167,7 @@ class RegForm(StatesGroup):
     city = State()
     tag_step = State()
 
-# ========== КВИЗ ==========
+# ========== КВИЗ (7 вопросов для класса) ==========
 QUESTIONS = [
     {
         "text": "Ты заходишь в переполненную комнату. Твои действия?",
@@ -349,7 +349,7 @@ async def ask_tag_question(message, state, step):
         await finish_registration(message, state)
         return
     q_data = TAG_QUESTIONS[step]
-    kb = tag_question_kb(q_data["tags"])
+    kb = tag_question_kb(q_data["tags"], step)
     await message.answer(
         f"{q_data['question']}\n\nВыбери один вариант:",
         reply_markup=kb
@@ -358,11 +358,13 @@ async def ask_tag_question(message, state, step):
 
 @dp.callback_query(F.data.startswith("tag_"))
 async def handle_tag_answer(call: CallbackQuery, state: FSMContext):
-    tag = call.data.split("_", 1)[1]
+    parts = call.data.split("_")
+    step = int(parts[1])
+    tag_idx = int(parts[2])
     data = await state.get_data()
-    step = data.get("tag_step", 0)
     selected = data.get("selected_tags", {})
     q_data = TAG_QUESTIONS[step]
+    tag = q_data["tags"][tag_idx]
     selected[q_data["category"]] = tag
     await state.update_data(selected_tags=selected)
     next_step = step + 1
@@ -379,6 +381,10 @@ async def finish_registration(message, state):
         await message.answer("❌ Выбери теги для всех категорий!")
         return
     with SessionLocal() as session_db:
+        existing_user = session_db.execute(select(User).where(User.tg_id == message.from_user.id)).scalar_one_or_none()
+        if existing_user:
+            await message.answer("❌ Ты уже зарегистрирован!")
+            return
         user = User(
             tg_id=message.from_user.id,
             username=data["username"],
@@ -392,6 +398,7 @@ async def finish_registration(message, state):
         for category, tag in selected_tags.items():
             session_db.add(UserTag(user_id=user.id, category=category, tag=tag))
         session_db.commit()
+        print(f"✅ Пользователь сохранён: tg_id={user.tg_id}, username={user.username}")
     await state.clear()
     await message.answer(
         f"✅ Регистрация завершена! Добро пожаловать, {data['username']}! 🎉",
@@ -409,6 +416,7 @@ async def cancel_registration(call: CallbackQuery, state: FSMContext):
 async def profile(call: CallbackQuery):
     with SessionLocal() as session_db:
         user = session_db.execute(select(User).where(User.tg_id == call.from_user.id)).scalar_one_or_none()
+        print(f"🔍 Поиск пользователя с tg_id={call.from_user.id}, найдено: {user is not None}")
         if not user:
             await call.message.answer("❌ Ты не зарегистрирован!")
             return
