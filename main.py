@@ -24,11 +24,11 @@ if not BOT_TOKEN:
     print("❌ Ошибка: BOT_TOKEN не найден в файле .env!")
     exit()
 
-DATABASE_URL = "sqlite:///database.db"
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///database.db")
 logging.basicConfig(level=logging.INFO)
 
 # ========== БАЗА ДАННЫХ ==========
-engine = create_engine(DATABASE_URL)
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 Base = declarative_base()
 SessionLocal = sessionmaker(bind=engine)
 
