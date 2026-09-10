@@ -341,12 +341,12 @@ async def set_city(msg: Message, state: FSMContext):
     await state.update_data(city=msg.text.strip())
     await state.update_data(selected_tags={})
     await state.set_state(RegForm.tag_step)
-    await ask_tag_question(msg, state, 0)
+    await ask_tag_question(msg, state, 0, msg.from_user.id)
 
 # ---------- КВИЗ ПО ТЕГАМ ----------
-async def ask_tag_question(message, state, step):
+async def ask_tag_question(message, state, step, user_id):
     if step >= len(TAG_QUESTIONS):
-        await finish_registration(message, state)
+        await finish_registration(message, state, user_id)
         return
     q_data = TAG_QUESTIONS[step]
     kb = tag_question_kb(q_data["tags"], step)
@@ -369,24 +369,24 @@ async def handle_tag_answer(call: CallbackQuery, state: FSMContext):
     await state.update_data(selected_tags=selected)
     next_step = step + 1
     if next_step >= len(TAG_QUESTIONS):
-        await finish_registration(call.message, state)
+        await finish_registration(call.message, state, call.from_user.id)
     else:
-        await ask_tag_question(call.message, state, next_step)
+        await ask_tag_question(call.message, state, next_step, call.from_user.id)
     await call.answer()
 
-async def finish_registration(message, state):
+async def finish_registration(message, state, user_id):
     data = await state.get_data()
     selected_tags = data.get("selected_tags", {})
     if len(selected_tags) != len(TAG_QUESTIONS):
         await message.answer("❌ Выбери теги для всех категорий!")
         return
     with SessionLocal() as session_db:
-        existing_user = session_db.execute(select(User).where(User.tg_id == message.from_user.id)).scalar_one_or_none()
+        existing_user = session_db.execute(select(User).where(User.tg_id == user_id)).scalar_one_or_none()
         if existing_user:
             await message.answer("❌ Ты уже зарегистрирован!")
             return
         user = User(
-            tg_id=message.from_user.id,
+            tg_id=user_id,
             username=data["username"],
             class_name=data["class_name"],
             age=data["age"],
