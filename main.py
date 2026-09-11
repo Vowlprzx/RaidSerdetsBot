@@ -7,7 +7,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.client.bot import DefaultBotProperties
-from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean, DateTime, Enum
+from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean, DateTime, Enum, BigInteger
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import select
@@ -47,7 +47,7 @@ class UserClass(enum.Enum):
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True)
-    tg_id = Column(Integer, unique=True, nullable=False)
+    tg_id = Column(BigInteger, unique=True, nullable=False)
     username = Column(String(64), unique=True, nullable=False)
     class_name = Column(Enum(UserClass), nullable=False)
     level = Column(Integer, default=1)
@@ -61,7 +61,7 @@ class User(Base):
 class UserTag(Base):
     __tablename__ = "user_tags"
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, nullable=False)
+    user_id = Column(BigInteger, nullable=False)
     category = Column(String(50), nullable=False)
     tag = Column(String(50), nullable=False)
 
