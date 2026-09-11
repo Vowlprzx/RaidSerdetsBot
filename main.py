@@ -65,6 +65,7 @@ class UserTag(Base):
     category = Column(String(50), nullable=False)
     tag = Column(String(50), nullable=False)
 
+Base.metadata.drop_all(engine)
 Base.metadata.create_all(engine)
 
 # ========== КЛАВИАТУРЫ ==========
