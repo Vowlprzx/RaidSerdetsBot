@@ -69,8 +69,8 @@ class UserTag(Base):
 
 Base.metadata.create_all(engine)
 # ВНИМАНИЕ: если обновляешь схему (добавляешь поля) - используй drop_all один раз:
-# Base.metadata.drop_all(engine)
-# Base.metadata.create_all(engine)
+Base.metadata.drop_all(engine)
+Base.metadata.create_all(engine)
 
 # ========== КЛАВИАТУРЫ ==========
 def main_menu():
