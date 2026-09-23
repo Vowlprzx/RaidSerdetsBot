@@ -85,7 +85,6 @@ class DungeonSession(Base):
 
 Base.metadata.create_all(engine)
 # Если менял схему (добавлял поля в DungeonSession) - на ОДИН запуск:
-# Base.metadata.drop_all(engine)
 # Base.metadata.create_all(engine)
 
 # ========== КЛАВИАТУРЫ ==========
