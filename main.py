@@ -67,7 +67,26 @@ class UserTag(Base):
     category = Column(String(50), nullable=False)
     tag = Column(String(50), nullable=False)
 
+class DungeonSession(Base):
+    __tablename__ = "dungeon_sessions"
+    id = Column(Integer, primary_key=True)
+    player1_tg_id = Column(BigInteger, nullable=False)
+    player2_tg_id = Column(BigInteger, nullable=False)
+    current_question = Column(Integer, default=0)
+    player1_answer = Column(Integer, nullable=True)
+    player2_answer = Column(Integer, nullable=True)
+    player1_ready = Column(Boolean, default=False)
+    player2_ready = Column(Boolean, default=False)
+    matches_count = Column(Integer, default=0)   # полных совпадений (same)
+    soft_count = Column(Integer, default=0)      # единство по духу (оба soft)
+    mixed_count = Column(Integer, default=0)     # компромисс (разные)
+    status = Column(String(20), default="active")
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
 Base.metadata.create_all(engine)
+# Если менял схему (добавлял поля в DungeonSession) - на ОДИН запуск:
+# Base.metadata.drop_all(engine)
+# Base.metadata.create_all(engine)
 
 # ========== КЛАВИАТУРЫ ==========
 def main_menu():
@@ -203,6 +222,125 @@ QUESTIONS = [
                  "Чувство юмора.": {"Бард": 2},
                  "Свободу и независимость.": {"Следопыт": 2, "Варвар": 1}}}
 ]
+
+# ========== ДАНЖ: ЛЕС ОБОРОТНЕЙ ==========
+# Вопросы: text, options (с soft-флагом), bridges (same/soft/mixed)
+FOREST_QUESTIONS = [
+    {
+        "text": "🌲 На опушке вас встретил улыбчивый охотник. Он предлагает проводить до деревни.",
+        "options": [
+            {"text": "Пойду с ним — помощь нужна", "soft": True},
+            {"text": "Откажусь, пойду сам", "soft": False},
+            {"text": "Пойду, но буду следить за ним", "soft": False},
+        ],
+        "bridges": {
+            "same": "Охотник повёл вас через лес. Деревья смыкаются за спиной, а тропа становится всё уже.",
+            "soft": "Вы идёте по лесу. Тропа извилистая, но тихая. Над головой шумит листва.",
+            "mixed": "Вы двинулись вглубь леса. Воздух становится холоднее, где-то вдалеке воет волк.",
+        }
+    },
+    {
+        "text": "🌙 Ночью у костра охотник рассказал историю о проклятии. Он странно смотрит на луну.",
+        "options": [
+            {"text": "Спрошу прямо, что с ним", "soft": False},
+            {"text": "Сделаю вид, что не заметил", "soft": True},
+            {"text": "Тихо достану оружие", "soft": False},
+        ],
+        "bridges": {
+            "same": "Ночь прошла спокойно. Утром вы продолжили путь молча.",
+            "soft": "Вы проснулись от холода. Костёр погас, а охотник сидит и смотрит вдаль.",
+            "mixed": "Ночь была тревожной. Вы оба плохо спали, но не подали виду.",
+        }
+    },
+    {
+        "text": "🏡 Вы нашли деревню. Жители слишком приветливы, слишком сыты.",
+        "options": [
+            {"text": "Это заговор, надо быть начеку", "soft": False},
+            {"text": "Просто гостеприимные люди", "soft": True},
+            {"text": "Что-то тут не так, но виду не подам", "soft": True},
+        ],
+        "bridges": {
+            "same": "Вас пригласили в дом. Ужин на столе, но что-то в этом доме не так.",
+            "soft": "Вас встретили тепло. Хозяева улыбаются, но улыбки кажутся застывшими.",
+            "mixed": "Вам выделили комнату. Дверь закрылась, и вы остались одни.",
+        }
+    },
+    {
+        "text": "🐺 Ночью вы проснулись от воя. Рядом волчий след.",
+        "options": [
+            {"text": "Разбужу напарника", "soft": True},
+            {"text": "Пойду по следу один", "soft": False},
+            {"text": "Притворюсь спящим и буду ждать", "soft": True},
+        ],
+        "bridges": {
+            "same": "Вы не сомкнули глаз до утра. След исчез к рассвету.",
+            "soft": "Вы лежали тихо, слушая ночь. Вой стих так же внезапно, как и начался.",
+            "mixed": "Ночь прошла в напряжении. Утром вы нашли ещё один след — свежий.",
+        }
+    },
+    {
+        "text": "📜 Охотник предлагает сделку: «Отдай мне свой амулет — проведу безопасной тропой».",
+        "options": [
+            {"text": "Отдам — безопасность важнее", "soft": True},
+            {"text": "Откажусь — он врёт", "soft": False},
+            {"text": "Предложу взамен что-то другое", "soft": False},
+        ],
+        "bridges": {
+            "same": "Охотник кивнул и повёл вас дальше. Тропа стала шире.",
+            "soft": "Вы продолжили путь. Лес будто расступился перед вами.",
+            "mixed": "Охотник что-то пробормотал и пошёл вперёд. Вы двинулись следом.",
+        }
+    },
+    {
+        "text": "🌕 Вы узнали, что охотник — оборотень. Он стоит перед вами и улыбается.",
+        "options": [
+            {"text": "Атакую первым", "soft": False},
+            {"text": "Попробую договориться", "soft": True},
+            {"text": "Притворюсь, что не знаю", "soft": True},
+        ],
+        "bridges": {
+            "same": "Оборотень прищурился. Между вами повисла тишина.",
+            "soft": "Оборотень опустил глаза. Что-то в его облике смягчилось.",
+            "mixed": "Оборотень замер. Воздух стал тяжёлым, будто перед грозой.",
+        }
+    },
+    {
+        "text": "🐺 Оборотень предлагает: «Я помогу вам, если сохраните мою тайну».",
+        "options": [
+            {"text": "Соглашусь", "soft": True},
+            {"text": "Откажусь, это опасно", "soft": False},
+            {"text": "Соглашусь, но потом расскажу", "soft": False},
+        ],
+        "bridges": {
+            "same": "Оборотень улыбнулся и кивнул. Он повёл вас через лес.",
+            "soft": "Он вздохнул с облегчением. Лес вокруг будто стал светлее.",
+            "mixed": "Он посмотрел на вас долгим взглядом, но ничего не сказал.",
+        }
+    },
+    {
+        "text": "🏡 Вы добрались до деревни. Оборотень ждёт вашего решения.",
+        "options": [
+            {"text": "Расскажу жителям — они должны знать", "soft": False},
+            {"text": "Сохраню тайну — он помог нам", "soft": True},
+            {"text": "Уйду молча — это не моё дело", "soft": True},
+        ],
+        "bridges": {
+            "same": "Решение принято. Деревня встречает вас тишиной.",
+            "soft": "Вы сделали свой выбор. Лес за спиной будто выдохнул.",
+            "mixed": "Деревня ждёт. И вы чувствуете, что этот выбор что-то изменит.",
+        }
+    },
+]
+
+DUNGEON_QUESTIONS = FOREST_QUESTIONS
+TOTAL_QUESTIONS = len(DUNGEON_QUESTIONS)
+
+def dungeon_kb(q_idx):
+    q = DUNGEON_QUESTIONS[q_idx]
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=opt["text"], callback_data=f"dq_{q_idx}_{i}")]
+        for i, opt in enumerate(q["options"])
+    ])
 
 # ========== БОТ ==========
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties())
@@ -359,7 +497,7 @@ async def finish_registration(message, state, user_id):
 @dp.callback_query(F.data == "cancel")
 async def cancel_registration(call: CallbackQuery, state: FSMContext):
     await state.clear()
-    await call.message.edit_text("❌ Регистрация отменена. Напиши /start заново.")
+    await call.message.edit_text("❌ Отменено. Напиши /start заново.")
     await call.answer()
 
 # ---------- ПРОФИЛЬ ----------
@@ -400,18 +538,13 @@ async def find_match(call: CallbackQuery):
         if not user:
             await call.answer("❌ Ты не зарегистрирован!", show_alert=True)
             return
-        if user.status == "dungeon":
-            await call.answer("⚔️ Ты уже в приключении!", show_alert=True)
-            return
-        if user.status == "matched":
-            await call.answer("👥 У тебя уже есть напарник!", show_alert=True)
+        if user.status in ("dungeon", "matched"):
+            await call.answer("⚔️ Ты уже занят!", show_alert=True)
             return
 
-        # Помечаем как ищущего
         user.status = "searching"
         session_db.commit()
 
-        # Ищем кандидатов: searching, не я, возраст ±2
         candidates = session_db.execute(
             select(User).where(
                 User.tg_id != user.tg_id,
@@ -420,11 +553,9 @@ async def find_match(call: CallbackQuery):
             )
         ).scalars().all()
 
-        # Получаем мои теги
         my_tags_raw = session_db.execute(select(UserTag).where(UserTag.user_id == user.id)).scalars().all()
         my_tags = {t.tag for t in my_tags_raw}
 
-        # Ищем лучшего кандидата: приоритет - тот же город, потом больше совпадений тегов
         best_match = None
         best_score = 0
         for c in sorted(candidates, key=lambda x: (x.city != user.city,)):
@@ -438,13 +569,11 @@ async def find_match(call: CallbackQuery):
         if not best_match:
             await call.message.answer(
                 "🔍 **Ищем напарника...**\n\n"
-                "Пока никого подходящего нет. Как только кто-то появится — мы сразу пришлём уведомление.\n\n"
-                "Можешь пока заполнить анкету подробнее, чтобы увеличить шансы."
+                "Пока никого подходящего нет. Как только кто-то появится — мы сразу пришлём уведомление."
             )
             await call.answer()
             return
 
-        # Нашли! Обновляем обоих
         user.status = "matched"
         user.partner_tg_id = best_match.tg_id
         user.is_ready = False
@@ -453,12 +582,10 @@ async def find_match(call: CallbackQuery):
         best_match.is_ready = False
         session_db.commit()
 
-        # Готовим карточки
         partner_tags = session_db.execute(select(UserTag).where(UserTag.user_id == best_match.id)).scalars().all()
         partner_tags_text = "\n".join([f"• {t.tag}" for t in partner_tags])
         my_tags_text = "\n".join([f"• {t.tag}" for t in my_tags_raw])
 
-        # Уведомляем себя
         await call.message.answer(
             f"🎉 **Найден напарник!**\n\n"
             f"👤 **{best_match.username}**\n"
@@ -470,7 +597,6 @@ async def find_match(call: CallbackQuery):
             reply_markup=ready_kb()
         )
 
-        # Уведомляем напарника
         try:
             await bot.send_message(
                 chat_id=best_match.tg_id,
@@ -490,7 +616,7 @@ async def find_match(call: CallbackQuery):
 
     await call.answer()
 
-# ---------- ГОТОВНОСТЬ ----------
+# ---------- ГОТОВНОСТЬ И СТАРТ ДАНЖА ----------
 @dp.callback_query(F.data == "ready")
 async def ready_handler(call: CallbackQuery):
     with SessionLocal() as session_db:
@@ -509,27 +635,234 @@ async def ready_handler(call: CallbackQuery):
             await call.answer()
             return
 
-        # Оба готовы!
+        # Оба готовы — создаём сессию данжа
         user.status = "dungeon"
         partner.status = "dungeon"
+        session = DungeonSession(
+            player1_tg_id=user.tg_id,
+            player2_tg_id=partner.tg_id,
+            current_question=0,
+            status="active"
+        )
+        session_db.add(session)
         session_db.commit()
 
-        text = (
-            "🚀 **Приключение начинается!**\n\n"
-            "Вы отправились в первый данж...\n\n"
-            "🛠️ Механика данжа скоро появится. Пока что — вот контакт напарника, чтобы не терять связь:\n"
+        # Отправляем первый вопрос обоим
+        q = DUNGEON_QUESTIONS[0]
+        intro = (
+            "🌲 **Лес Оборотней**\n\n"
+            "Вы вошли в лес, о котором ходят легенды. Говорят, здесь пропадают люди. "
+            "Но вы идёте вдвоём — а значит, у вас есть шанс.\n\n"
+            "━━━━━━━━━━━━━━━\n"
+            f"📍 **Вопрос 1 из {TOTAL_QUESTIONS}**\n\n"
+            f"{q['text']}"
         )
+        kb = dungeon_kb(0)
 
-        await call.message.edit_text(text + f"\n👤 @{partner.username if partner.username else 'напарник'}")
         try:
-            await bot.send_message(
-                chat_id=partner.tg_id,
-                text=text + f"\n👤 @{user.username if user.username else 'напарник'}"
-            )
+            await call.message.edit_text(intro, reply_markup=kb)
+        except Exception:
+            await call.message.answer(intro, reply_markup=kb)
+        try:
+            await bot.send_message(chat_id=partner.tg_id, text=intro, reply_markup=kb)
         except Exception as e:
             print(f"⚠️ {e}")
 
     await call.answer()
+
+# ---------- ОТВЕТЫ В ДАНЖЕ ----------
+@dp.callback_query(F.data.startswith("dq_"))
+async def dungeon_answer(call: CallbackQuery):
+    parts = call.data.split("_")
+    question_idx = int(parts[1])
+    answer_idx = int(parts[2])
+
+    with SessionLocal() as session_db:
+        user = session_db.execute(select(User).where(User.tg_id == call.from_user.id)).scalar_one_or_none()
+        if not user:
+            await call.answer("❌ Ошибка", show_alert=True)
+            return
+
+        session = session_db.execute(
+            select(DungeonSession).where(
+                DungeonSession.status == "active",
+                ((DungeonSession.player1_tg_id == user.tg_id) | (DungeonSession.player2_tg_id == user.tg_id))
+            )
+        ).scalars().first()
+
+        if not session:
+            await call.answer("❌ Сессия не найдена", show_alert=True)
+            return
+
+        if session.current_question != question_idx:
+            await call.answer("⏳ Уже идёт следующий вопрос", show_alert=True)
+            return
+
+        # Сохраняем ответ
+        if session.player1_tg_id == user.tg_id:
+            if session.player1_ready:
+                await call.answer("✅ Ты уже ответил", show_alert=True)
+                return
+            session.player1_answer = answer_idx
+            session.player1_ready = True
+        else:
+            if session.player2_ready:
+                await call.answer("✅ Ты уже ответил", show_alert=True)
+                return
+            session.player2_answer = answer_idx
+            session.player2_ready = True
+
+        session_db.commit()
+
+        # Меняем сообщение у того, кто ответил
+        q = DUNGEON_QUESTIONS[question_idx]
+        await call.message.edit_text(
+            f"✅ Твой выбор: **{q['options'][answer_idx]['text']}**\n\n"
+            f"⏳ Ждём напарника..."
+        )
+        await call.answer("Ответ сохранён!")
+
+        # Если оба ответили — обрабатываем
+        if session.player1_ready and session.player2_ready:
+            await process_question_result(session_db, session, question_idx)
+
+async def process_question_result(session_db, session, question_idx):
+    q = DUNGEON_QUESTIONS[question_idx]
+    p1_ans = session.player1_answer
+    p2_ans = session.player2_answer
+
+    same = (p1_ans == p2_ans)
+    p1_soft = q["options"][p1_ans]["soft"]
+    p2_soft = q["options"][p2_ans]["soft"]
+
+    # Определяем тип
+    if same:
+        bridge = q["bridges"]["same"]
+        session.matches_count += 1
+        kind = "same"
+    elif p1_soft and p2_soft:
+        bridge = q["bridges"]["soft"]
+        session.soft_count += 1
+        kind = "soft"
+    else:
+        bridge = q["bridges"]["mixed"]
+        session.mixed_count += 1
+        kind = "mixed"
+
+    session.player1_ready = False
+    session.player2_ready = False
+    session.current_question += 1
+    session.player1_answer = None
+    session.player2_answer = None
+    session_db.commit()
+
+    # ОДИН И ТОТ ЖЕ текст обоим — они не знают, что произошло
+    next_step = session.current_question
+
+    if next_step >= TOTAL_QUESTIONS:
+        # Данж закончен
+        await finish_dungeon(session_db, session)
+        return
+
+    # Отправляем мостик + следующий вопрос ОБОИМ
+    next_q = DUNGEON_QUESTIONS[next_step]
+    next_text = (
+        f"{bridge}\n\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"📍 **Вопрос {next_step + 1} из {TOTAL_QUESTIONS}**\n\n"
+        f"{next_q['text']}"
+    )
+    next_kb = dungeon_kb(next_step)
+
+    try:
+        await bot.send_message(chat_id=session.player1_tg_id, text=next_text, reply_markup=next_kb)
+    except Exception as e:
+        print(f"⚠️ {e}")
+    try:
+        await bot.send_message(chat_id=session.player2_tg_id, text=next_text, reply_markup=next_kb)
+    except Exception as e:
+        print(f"⚠️ {e}")
+
+async def finish_dungeon(session_db, session):
+    session.status = "finished"
+    matches = session.matches_count
+    softs = session.soft_count
+    mixed = session.mixed_count
+    total = TOTAL_QUESTIONS
+
+    # Сбрасываем статусы пользователей
+    p1 = session_db.execute(select(User).where(User.tg_id == session.player1_tg_id)).scalar_one_or_none()
+    p2 = session_db.execute(select(User).where(User.tg_id == session.player2_tg_id)).scalar_one_or_none()
+
+    exp_gain = matches * 10 + softs * 5
+
+    if p1:
+        p1.status = "idle"
+        p1.partner_tg_id = None
+        p1.is_ready = False
+        p1.experience = (p1.experience or 0) + exp_gain
+    if p2:
+        p2.status = "idle"
+        p2.partner_tg_id = None
+        p2.is_ready = False
+        p2.experience = (p2.experience or 0) + exp_gain
+    session_db.commit()
+
+    # Процент = (совпадения + soft*0.5) / всего * 100
+    effective = matches + softs * 0.5
+    percent = int(effective / total * 100)
+
+    # Вердикт
+    if percent >= 90:
+        verdict = (
+            "✨ **Идеальный резонанс!**\n\n"
+            "Вы словно одна душа в двух телах. Такое встречается редко — не упустите друг друга."
+        )
+    elif percent >= 70:
+        verdict = (
+            "💫 **Сильный синхрон!**\n\n"
+            "У вас много общего. Это отличная основа для настоящего знакомства."
+        )
+    elif percent >= 40:
+        verdict = (
+            "🤔 **Есть точки соприкосновения.**\n\n"
+            "Вы разные — но в этом и интерес. Есть о чём поговорить и чему удивиться."
+        )
+    else:
+        verdict = (
+            "💎 **Вы настолько неповторимы, что найти похожего — почти невозможно.**\n\n"
+            "Это как раз тот случай. Может быть, именно поэтому вам стоит узнать друг друга поближе?"
+        )
+
+    # Контакты (только если >= 40%)
+    if percent >= 40 and p1 and p2:
+        contacts = (
+            f"\n\n📞 **Держите связь:**\n"
+            f"• {p1.username}\n"
+            f"• {p2.username}\n\n"
+            f"Напишите друг другу, не теряйтесь!"
+        )
+    else:
+        contacts = "\n\n💭 Если захотите — попробуйте пройти другой данж вместе."
+
+    final_text = (
+        f"🏁 **Данж завершён!**\n\n"
+        f"💫 Синхрон: **{percent}%**\n"
+        f"✅ Совпадений: **{matches}**\n"
+        f"🤝 Единство по духу: **{softs}**\n"
+        f"⚔️ Компромиссов: **{mixed}**\n\n"
+        f"{verdict}"
+        f"{contacts}"
+    )
+
+    try:
+        await bot.send_message(chat_id=session.player1_tg_id, text=final_text, reply_markup=main_menu())
+    except Exception as e:
+        print(f"⚠️ {e}")
+    try:
+        await bot.send_message(chat_id=session.player2_tg_id, text=final_text, reply_markup=main_menu())
+    except Exception as e:
+        print(f"⚠️ {e}")
 
 # ---------- ОТМЕНА МАТЧА ----------
 @dp.callback_query(F.data == "cancel_match")
