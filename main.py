@@ -944,6 +944,25 @@ async def setcity(msg: Message):
 
 # ========== ЗАПУСК ==========
 async def main():
+    # Сброс "зависших" сессий и статусов при запуске
+    with SessionLocal() as session_db:
+        active_sessions = session_db.execute(
+            select(DungeonSession).where(DungeonSession.status == "active")
+        ).scalars().all()
+        for s in active_sessions:
+            s.status = "finished"
+
+        stuck_users = session_db.execute(
+            select(User).where(User.status.in_(["dungeon", "matched", "searching"]))
+        ).scalars().all()
+        for u in stuck_users:
+            u.status = "idle"
+            u.partner_tg_id = None
+            u.is_ready = False
+
+        session_db.commit()
+        print(f"🧹 Сброшено зависших статусов: {len(stuck_users)}")
+
     print("✅ База данных готова!")
     print("🚀 Бот 'Рейд Сердец' запущен!")
     await dp.start_polling(bot)
