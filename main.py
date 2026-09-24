@@ -54,7 +54,7 @@ class User(Base):
     experience = Column(Integer, default=0)
     age = Column(Integer, nullable=True)
     city = Column(String(100), nullable=True)
-    status = Column(String(20), default="idle")  # idle / searching / matched / dungeon
+    status = Column(String(20), default="idle")
     partner_tg_id = Column(BigInteger, nullable=True)
     is_ready = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
@@ -77,15 +77,13 @@ class DungeonSession(Base):
     player2_answer = Column(Integer, nullable=True)
     player1_ready = Column(Boolean, default=False)
     player2_ready = Column(Boolean, default=False)
-    matches_count = Column(Integer, default=0)   # полных совпадений (same)
-    soft_count = Column(Integer, default=0)      # единство по духу (оба soft)
-    mixed_count = Column(Integer, default=0)     # компромисс (разные)
+    matches_count = Column(Integer, default=0)
+    soft_count = Column(Integer, default=0)
+    mixed_count = Column(Integer, default=0)
     status = Column(String(20), default="active")
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
 Base.metadata.create_all(engine)
-# Если менял схему (добавлял поля в DungeonSession) - на ОДИН запуск:
-# Base.metadata.create_all(engine)
 
 # ========== КЛАВИАТУРЫ ==========
 def main_menu():
@@ -223,7 +221,6 @@ QUESTIONS = [
 ]
 
 # ========== ДАНЖ: ЛЕС ОБОРОТНЕЙ ==========
-# Вопросы: text, options (с soft-флагом), bridges (same/soft/mixed)
 FOREST_QUESTIONS = [
     {
         "text": "🌲 На опушке вас встретил улыбчивый охотник. Он предлагает проводить до деревни.",
@@ -634,7 +631,6 @@ async def ready_handler(call: CallbackQuery):
             await call.answer()
             return
 
-        # Оба готовы — создаём сессию данжа
         user.status = "dungeon"
         partner.status = "dungeon"
         session = DungeonSession(
@@ -646,7 +642,6 @@ async def ready_handler(call: CallbackQuery):
         session_db.add(session)
         session_db.commit()
 
-        # Отправляем первый вопрос обоим
         q = DUNGEON_QUESTIONS[0]
         intro = (
             "🌲 **Лес Оборотней**\n\n"
@@ -697,7 +692,6 @@ async def dungeon_answer(call: CallbackQuery):
             await call.answer("⏳ Уже идёт следующий вопрос", show_alert=True)
             return
 
-        # Сохраняем ответ
         if session.player1_tg_id == user.tg_id:
             if session.player1_ready:
                 await call.answer("✅ Ты уже ответил", show_alert=True)
@@ -713,7 +707,6 @@ async def dungeon_answer(call: CallbackQuery):
 
         session_db.commit()
 
-        # Меняем сообщение у того, кто ответил
         q = DUNGEON_QUESTIONS[question_idx]
         await call.message.edit_text(
             f"✅ Твой выбор: **{q['options'][answer_idx]['text']}**\n\n"
@@ -721,7 +714,6 @@ async def dungeon_answer(call: CallbackQuery):
         )
         await call.answer("Ответ сохранён!")
 
-        # Если оба ответили — обрабатываем
         if session.player1_ready and session.player2_ready:
             await process_question_result(session_db, session, question_idx)
 
@@ -734,19 +726,15 @@ async def process_question_result(session_db, session, question_idx):
     p1_soft = q["options"][p1_ans]["soft"]
     p2_soft = q["options"][p2_ans]["soft"]
 
-    # Определяем тип
     if same:
         bridge = q["bridges"]["same"]
         session.matches_count += 1
-        kind = "same"
     elif p1_soft and p2_soft:
         bridge = q["bridges"]["soft"]
         session.soft_count += 1
-        kind = "soft"
     else:
         bridge = q["bridges"]["mixed"]
         session.mixed_count += 1
-        kind = "mixed"
 
     session.player1_ready = False
     session.player2_ready = False
@@ -755,15 +743,12 @@ async def process_question_result(session_db, session, question_idx):
     session.player2_answer = None
     session_db.commit()
 
-    # ОДИН И ТОТ ЖЕ текст обоим — они не знают, что произошло
     next_step = session.current_question
 
     if next_step >= TOTAL_QUESTIONS:
-        # Данж закончен
         await finish_dungeon(session_db, session)
         return
 
-    # Отправляем мостик + следующий вопрос ОБОИМ
     next_q = DUNGEON_QUESTIONS[next_step]
     next_text = (
         f"{bridge}\n\n"
@@ -789,7 +774,6 @@ async def finish_dungeon(session_db, session):
     mixed = session.mixed_count
     total = TOTAL_QUESTIONS
 
-    # Сбрасываем статусы пользователей
     p1 = session_db.execute(select(User).where(User.tg_id == session.player1_tg_id)).scalar_one_or_none()
     p2 = session_db.execute(select(User).where(User.tg_id == session.player2_tg_id)).scalar_one_or_none()
 
@@ -807,11 +791,9 @@ async def finish_dungeon(session_db, session):
         p2.experience = (p2.experience or 0) + exp_gain
     session_db.commit()
 
-    # Процент = (совпадения + soft*0.5) / всего * 100
     effective = matches + softs * 0.5
     percent = int(effective / total * 100)
 
-    # Вердикт
     if percent >= 90:
         verdict = (
             "✨ **Идеальный резонанс!**\n\n"
@@ -833,7 +815,6 @@ async def finish_dungeon(session_db, session):
             "Это как раз тот случай. Может быть, именно поэтому вам стоит узнать друг друга поближе?"
         )
 
-    # Контакты (только если >= 40%)
     if percent >= 40 and p1 and p2:
         contacts = (
             f"\n\n📞 **Держите связь:**\n"
@@ -942,9 +923,34 @@ async def setcity(msg: Message):
         session_db.commit()
         await msg.answer(f"✅ Город изменён на {city}")
 
+# ---------- СБРОС (АДМИН-КОМАНДА) ----------
+@dp.message(Command("reset"))
+async def reset_status(msg: Message):
+    with SessionLocal() as session_db:
+        user = session_db.execute(select(User).where(User.tg_id == msg.from_user.id)).scalar_one_or_none()
+        if not user:
+            await msg.answer("❌ Ты не зарегистрирован!")
+            return
+
+        sessions = session_db.execute(
+            select(DungeonSession).where(
+                DungeonSession.status == "active",
+                ((DungeonSession.player1_tg_id == user.tg_id) | (DungeonSession.player2_tg_id == user.tg_id))
+            )
+        ).scalars().all()
+        for s in sessions:
+            s.status = "finished"
+
+        user.status = "idle"
+        user.partner_tg_id = None
+        user.is_ready = False
+        session_db.commit()
+
+    await msg.answer("✅ Статус сброшен. Ты снова свободен!", reply_markup=main_menu())
+
 # ========== ЗАПУСК ==========
 async def main():
-    # Сброс "зависших" сессий и статусов при запуске
+    # Автосброс зависших сессий при старте
     with SessionLocal() as session_db:
         active_sessions = session_db.execute(
             select(DungeonSession).where(DungeonSession.status == "active")
