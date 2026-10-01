@@ -83,7 +83,6 @@ class DungeonSession(Base):
     status = Column(String(20), default="active")
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
-Base.metadata.drop_all(engine)
 Base.metadata.create_all(engine)
 
 # ========== КЛАВИАТУРЫ ==========
