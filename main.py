@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import random
+import datetime
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
@@ -12,7 +13,6 @@ from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean, Da
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import select
-import datetime
 import enum
 import os
 from dotenv import load_dotenv
@@ -27,8 +27,12 @@ if not BOT_TOKEN:
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///database.db")
 logging.basicConfig(level=logging.INFO)
 
+# ========== КОНСТАНТЫ ==========
+POLICY_URL = "https://telegra.ph/Telegram-bota-Rejd-Serdec-10-05"
+SUPPORT_EMAIL = "igor_borysov@mail.ru"
+
 # ========== БАЗА ДАННЫХ ==========
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, connect_args={"sslmode": "require"})
 Base = declarative_base()
 SessionLocal = sessionmaker(bind=engine)
 
@@ -47,12 +51,15 @@ class User(Base):
     experience = Column(Integer, default=0)
     age = Column(Integer, nullable=True)
     city = Column(String(100), nullable=True)
-    key_text = Column(String(200), default="")  # КЛЮЧ
+    key_text = Column(String(200), default="")
     status = Column(String(20), default="idle")
     partner_tg_id = Column(BigInteger, nullable=True)
     is_ready = Column(Boolean, default=False)
     early_exits = Column(Integer, default=0)
     full_dungeons = Column(Integer, default=0)
+    consent_given = Column(Boolean, default=False)
+    last_daily = Column(DateTime, nullable=True)
+    daily_streak = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
 class UserTag(Base):
@@ -68,7 +75,7 @@ class DungeonSession(Base):
     player1_tg_id = Column(BigInteger, nullable=False)
     player2_tg_id = Column(BigInteger, nullable=False)
     theme_key = Column(String(30), default="forest")
-    current_phase = Column(Integer, default=1)  # 1, 2, 3
+    current_phase = Column(Integer, default=1)
     current_question = Column(Integer, default=0)
     player1_answer = Column(Integer, nullable=True)
     player2_answer = Column(Integer, nullable=True)
@@ -77,15 +84,62 @@ class DungeonSession(Base):
     phase1_matches = Column(Integer, default=0)
     phase2_matches = Column(Integer, default=0)
     phase3_matches = Column(Integer, default=0)
-    msg_stage = Column(Integer, default=0)  # 0 = никто, 1 = один, 2 = оба
+    msg_stage = Column(Integer, default=0)
     player1_msg = Column(String(200), nullable=True)
     player2_msg = Column(String(200), nullable=True)
     status = Column(String(20), default="active")
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
 Base.metadata.create_all(engine)
+# На ОДИН запуск (после изменения схемы):
+# Base.metadata.drop_all(engine)
+# Base.metadata.create_all(engine)
+
+# ========== УРОВНИ ==========
+LEVEL_THRESHOLDS = [
+    (1, 0),
+    (2, 100),
+    (3, 300),
+    (4, 700),
+    (5, 1200),
+]
+
+def calculate_level(exp):
+    level = 1
+    for lvl, threshold in LEVEL_THRESHOLDS:
+        if exp >= threshold:
+            level = lvl
+    return level
+
+def progress_to_next_level(exp):
+    current_level = calculate_level(exp)
+    if current_level >= 5:
+        return (exp, exp)
+    next_threshold = None
+    current_threshold = 0
+    for lvl, th in LEVEL_THRESHOLDS:
+        if lvl == current_level:
+            current_threshold = th
+        if lvl == current_level + 1:
+            next_threshold = th
+            break
+    return (exp - current_threshold, next_threshold - current_threshold)
+
+def progress_bar(current, total, length=8):
+    if total <= 0:
+        return "▰" * length
+    filled = int((current / total) * length)
+    filled = max(0, min(length, filled))
+    return "▰" * filled + "▱" * (length - filled)
 
 # ========== КЛАВИАТУРЫ ==========
+def consent_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Согласен", callback_data="consent_yes")],
+        [InlineKeyboardButton(text="📄 Политика конфиденциальности", url=POLICY_URL)],
+        [InlineKeyboardButton(text="❌ Не согласен", callback_data="consent_no")]
+    ])
+
 def main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📜 Моя анкета", callback_data="profile")],
@@ -128,7 +182,7 @@ def dungeon_answer_kb(theme_key, phase_idx, q_idx):
         for i, opt in enumerate(q["options"])
     ])
 
-# ========== ТЕГИ (без изменений) ==========
+# ========== ТЕГИ ==========
 TAG_QUESTIONS = [
     {"category": "Развлечения", "question": "🎮 Как ты обычно проводишь свободное время?",
      "tags": ["Видеоигры", "Фильмы", "Книги", "Музыка", "Рисование", "Настольные игры"]},
@@ -192,9 +246,7 @@ QUESTIONS = [
                  "Свободу и независимость.": {"Следопыт": 2, "Варвар": 1}}}
 ]
 
-# ========== ДАННЫЕ ТЕМ ==========
-# В каждой теме — 3 фазы. Фаза 1: 3 вопроса, Фаза 2: 4, Фаза 3: 4.
-
+# ========== ДАНЖИ ==========
 FOREST = {
     "name": "🌲 Лес оборотней",
     "phases": [
@@ -473,17 +525,32 @@ WELCOME = """
 Нажми **"Начать квиз!"**, чтобы узнать свой класс.
 """
 
+CONSENT_TEXT = f"""
+📄 **Согласие на обработку персональных данных**
+
+Для работы бота мне нужно обрабатывать твои данные: никнейм, возраст, город, «Ключ», Telegram ID.
+
+📍 Данные хранятся на серверах в России (г. Москва).
+🔒 Используется шифрование.
+🗑️ Ты можешь удалить аккаунт командой `/delete_me` в любой момент.
+
+Продолжая, ты соглашаешься с обработкой данных.
+
+[📄 Политика конфиденциальности]({POLICY_URL})
+"""
+
 PROFILE_TEMPLATE = """
 📜 **Твоя анкета**
 
 👤 **Имя:** {username}
 ⚔️ **Класс:** {class_name}
-📈 **Уровень:** {level}
+📈 **Уровень:** {level} {progress_bar}
 🎂 **Возраст:** {age}
 🏙️ **Город:** {city}
 🔑 **Ключ:** {key_text}
 🏷️ **Теги:**
 {tags}
+🔥 **Стрик:** {daily_streak} дн.
 📊 **Статус:** {status}
 """
 
@@ -504,7 +571,7 @@ CLASS_EMOJI = {"Рыцарь": "🗡️", "Тёмный Страж": "💜", "В
                "Инженер": "🗝️", "Бард": "🎭", "Тень": "🌙", "Следопыт": "🏹", "Жрец": "🛡️", "Друид": "🌿"}
 
 STATUS_NAMES = {"idle": "🟢 Свободен", "searching": "🟡 В поиске", "matched": "🔵 Нашёл пару",
-                "dungeon": "🔴 В приключении", "waiting_msg": "💬 В обмене сообщениями"}
+                "dungeon": "🔴 В приключении"}
 
 # ========== СОСТОЯНИЯ ==========
 class RegForm(StatesGroup):
@@ -514,18 +581,67 @@ class RegForm(StatesGroup):
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties())
 dp = Dispatcher()
 
-# ---------- /start ----------
+# ========== ЕЖЕДНЕВНЫЙ ВХОД ==========
+async def check_daily(user, db):
+    now = datetime.datetime.utcnow()
+    today = now.date()
+    if user.last_daily:
+        last = user.last_daily.date()
+        delta = (today - last).days
+        if delta == 0:
+            return (False, 0, user.daily_streak)
+        elif delta == 1:
+            user.daily_streak += 1
+        else:
+            user.daily_streak = 1
+    else:
+        user.daily_streak = 1
+    user.last_daily = now
+    streak = user.daily_streak
+    exp_bonus = min(10 + (streak - 1) * 5, 50)
+    user.experience = (user.experience or 0) + exp_bonus
+    user.level = calculate_level(user.experience)
+    db.commit()
+    return (True, exp_bonus, streak)
+
+# ========== СТАРТ ==========
 @dp.message(Command("start"))
 async def start(msg: Message, state: FSMContext):
     await state.clear()
     with SessionLocal() as db:
         user = db.execute(select(User).where(User.tg_id == msg.from_user.id)).scalar_one_or_none()
-    if user:
-        await msg.answer(f"С возвращением, {user.username}! 🎮", reply_markup=main_menu())
-    else:
-        await msg.answer(WELCOME, reply_markup=class_choice())
+        if user and not user.consent_given:
+            await msg.answer(CONSENT_TEXT, reply_markup=consent_kb())
+            return
+        if user:
+            was_daily, exp_bonus, streak = await check_daily(user, db)
+            if was_daily:
+                await msg.answer(f"🔥 **Стрик: {streak} дн.** +{exp_bonus} опыта!")
+            await msg.answer(f"С возвращением, {user.username}! 🎮", reply_markup=main_menu())
+        else:
+            await msg.answer(CONSENT_TEXT, reply_markup=consent_kb())
 
-# ---------- КВИЗ ----------
+@dp.callback_query(F.data == "consent_yes")
+async def consent_yes(call: CallbackQuery):
+    with SessionLocal() as db:
+        user = db.execute(select(User).where(User.tg_id == call.from_user.id)).scalar_one_or_none()
+        if user:
+            user.consent_given = True
+            db.commit()
+            await call.message.edit_text(f"С возвращением, {user.username}! 🎮", reply_markup=main_menu())
+        else:
+            await call.message.edit_text(WELCOME, reply_markup=class_choice())
+    await call.answer("✅ Согласие получено!")
+
+@dp.callback_query(F.data == "consent_no")
+async def consent_no(call: CallbackQuery):
+    await call.message.edit_text(
+        "❌ Без согласия я не могу продолжить.\n\n"
+        "Если передумаешь — напиши /start заново."
+    )
+    await call.answer()
+
+# ========== КВИЗ ==========
 @dp.callback_query(F.data == "class_start")
 async def start_quiz(call: CallbackQuery, state: FSMContext):
     await state.update_data(quiz_step=0, scores={})
@@ -534,8 +650,7 @@ async def start_quiz(call: CallbackQuery, state: FSMContext):
 
 async def ask_question(message, state, step):
     if step >= len(QUESTIONS):
-        await finish_quiz(message, state)
-        return
+        await finish_quiz(message, state); return
     q = QUESTIONS[step]
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t, callback_data=f"q_{step}_{i}")] for i, t in enumerate(q["options"].keys())
@@ -546,8 +661,7 @@ async def ask_question(message, state, step):
 async def answer_quiz(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     step = int(call.data.split("_")[1]); idx = int(call.data.split("_")[2])
-    q = QUESTIONS[step]
-    opt_text = list(q["options"].keys())[idx]
+    q = QUESTIONS[step]; opt_text = list(q["options"].keys())[idx]
     scores = data.get("scores", {})
     for cls, pts in q["options"][opt_text].items():
         scores[cls] = scores.get(cls, 0) + pts
@@ -559,8 +673,7 @@ async def finish_quiz(message, state):
     data = await state.get_data()
     scores = data.get("scores", {})
     if not scores:
-        await message.edit_text("❌ Ошибка. Попробуй /start заново.")
-        return
+        await message.edit_text("❌ Ошибка. Попробуй /start заново."); return
     class_name = max(scores, key=scores.get)
     class_map = {"Рыцарь": UserClass.RYTSAR, "Тёмный Страж": UserClass.TEMNYI_STRAZH,
                  "Варвар": UserClass.VARVAR, "Волшебник": UserClass.VOLSHEBNIK,
@@ -572,7 +685,6 @@ async def finish_quiz(message, state):
     await message.answer("📝 Введи **никнейм** (2–30 символов):", reply_markup=cancel_kb())
     await state.set_state(RegForm.username)
 
-# ---------- АНКЕТА ----------
 @dp.message(RegForm.username)
 async def set_username(msg: Message, state: FSMContext):
     name = msg.text.strip()
@@ -600,9 +712,9 @@ async def set_age(msg: Message, state: FSMContext):
 async def set_city(msg: Message, state: FSMContext):
     await state.update_data(city=msg.text.strip())
     await msg.answer(
-        "🔑 **Ключ** — это то, что ты хочешь сказать о себе другим. Коротко, до 100 символов.\n\n"
-        "Пример: *«М/25, ищу того, с кем можно обсудить аниме и поиграть в D&D»*\n\n"
-        "Показывается напарнику **только после 1-й фазы данжа**. Это твой шанс заинтриговать.",
+        "🔑 **Ключ** — это то, что ты хочешь сказать о себе другим. До 100 символов.\n\n"
+        "Пример: *«М/25, ищу того, с кем можно обсудить аниме»*\n\n"
+        "Показывается напарнику **только после 1-й фазы** данжа.",
         reply_markup=cancel_kb()
     )
     await state.set_state(RegForm.key_text)
@@ -611,20 +723,17 @@ async def set_city(msg: Message, state: FSMContext):
 async def set_key(msg: Message, state: FSMContext):
     key = msg.text.strip()
     if len(key) < 5 or len(key) > 100:
-        await msg.answer("❌ Ключ должен быть от 5 до 100 символов. Попробуй снова:"); return
-    await state.update_data(key_text=key)
-    await state.update_data(selected_tags={})
+        await msg.answer("❌ Ключ от 5 до 100 символов."); return
+    await state.update_data(key_text=key, selected_tags={})
     await state.set_state(RegForm.tag_step)
     await ask_tag_question(msg, state, 0, msg.from_user.id)
 
-# ---------- КВИЗ ПО ТЕГАМ ----------
 async def ask_tag_question(message, state, step, user_id):
     if step >= len(TAG_QUESTIONS):
         await finish_registration(message, state, user_id); return
     q_data = TAG_QUESTIONS[step]
     kb = tag_question_kb(q_data["tags"], step)
     await message.answer(f"{q_data['question']}\n\nВыбери один вариант:", reply_markup=kb)
-    await state.update_data(tag_step=step)
 
 @dp.callback_query(F.data.startswith("tag_"))
 async def handle_tag_answer(call: CallbackQuery, state: FSMContext):
@@ -651,7 +760,8 @@ async def finish_registration(message, state, user_id):
         if db.execute(select(User).where(User.tg_id == user_id)).scalar_one_or_none():
             await message.answer("❌ Ты уже зарегистрирован!"); return
         user = User(tg_id=user_id, username=data["username"], class_name=data["class_name"],
-                    age=data["age"], city=data["city"], key_text=data["key_text"], status="idle")
+                    age=data["age"], city=data["city"], key_text=data["key_text"],
+                    status="idle", consent_given=True)
         db.add(user); db.flush()
         for category, tag in selected_tags.items():
             db.add(UserTag(user_id=user.id, category=category, tag=tag))
@@ -666,7 +776,7 @@ async def cancel_registration(call: CallbackQuery, state: FSMContext):
     await call.message.edit_text("❌ Отменено. Напиши /start заново.")
     await call.answer()
 
-# ---------- ПРОФИЛЬ ----------
+# ========== ПРОФИЛЬ ==========
 @dp.callback_query(F.data == "profile")
 async def profile(call: CallbackQuery):
     with SessionLocal() as db:
@@ -675,31 +785,44 @@ async def profile(call: CallbackQuery):
             await call.message.answer("❌ Ты не зарегистрирован!"); return
         tags = db.execute(select(UserTag).where(UserTag.user_id == user.id)).scalars().all()
         tags_text = "\n".join([f"• {t.category}: {t.tag}" for t in tags]) or "Не выбраны"
+        cur_exp, total_exp = progress_to_next_level(user.experience or 0)
+        if calculate_level(user.experience or 0) >= 5:
+            bar = "🏆 МАКС"
+        else:
+            bar = f"{progress_bar(cur_exp, total_exp)} {cur_exp}/{total_exp}"
         await call.message.edit_text(
             PROFILE_TEMPLATE.format(
                 username=user.username,
                 class_name=f"{CLASS_EMOJI.get(user.class_name.value, '')} {user.class_name.value}",
-                level=user.level, age=user.age or "Не указан", city=user.city or "Не указан",
+                level=user.level,
+                progress_bar=bar,
+                age=user.age or "Не указан",
+                city=user.city or "Не указан",
                 key_text=user.key_text or "Не указан",
-                tags=tags_text, status=STATUS_NAMES.get(user.status, user.status)
+                tags=tags_text,
+                daily_streak=user.daily_streak or 0,
+                status=STATUS_NAMES.get(user.status, user.status)
             ), reply_markup=main_menu()
         )
     await call.answer()
 
 @dp.callback_query(F.data == "edit_profile")
 async def edit_profile(call: CallbackQuery):
-    await call.message.edit_text("📝 Редактирование:\n/setname Имя\n/setage 25\n/setcity Москва\n/setkey Твой ключ",
-                                 reply_markup=main_menu())
+    await call.message.edit_text(
+        "📝 Редактирование:\n/setname Имя\n/setage 25\n/setcity Москва\n/setkey Твой ключ",
+        reply_markup=main_menu())
     await call.answer()
 
-# ---------- МАТЧМЕЙКИНГ ----------
+# ========== МАТЧМЕЙКИНГ ==========
 @dp.callback_query(F.data == "find_match")
 async def find_match(call: CallbackQuery):
     with SessionLocal() as db:
         user = db.execute(select(User).where(User.tg_id == call.from_user.id)).scalar_one_or_none()
         if not user:
             await call.answer("❌ Ты не зарегистрирован!", show_alert=True); return
-        if user.status in ("dungeon", "matched", "waiting_msg"):
+        if not user.consent_given:
+            await call.answer("❌ Сначала дай согласие: /start", show_alert=True); return
+        if user.status in ("dungeon", "matched"):
             await call.answer("⚔️ Ты уже занят!", show_alert=True); return
         user.status = "searching"; db.commit()
         candidates = db.execute(select(User).where(
@@ -716,7 +839,7 @@ async def find_match(call: CallbackQuery):
             if shared >= 1 and shared > best_score:
                 best_score = shared; best_match = c
         if not best_match:
-            await call.message.answer("🔍 **Ищем напарника...**\n\nПока никого подходящего нет. Как только кто-то появится — мы сразу пришлём уведомление.")
+            await call.message.answer("🔍 **Ищем напарника...**\n\nПока никого подходящего нет.")
             await call.answer(); return
         user.status = "matched"; user.partner_tg_id = best_match.tg_id; user.is_ready = False
         best_match.status = "matched"; best_match.partner_tg_id = user.tg_id; best_match.is_ready = False
@@ -728,20 +851,19 @@ async def find_match(call: CallbackQuery):
             f"🎉 **Найден напарник!**\n\n👤 **{best_match.username}**\n"
             f"{CLASS_EMOJI[best_match.class_name.value]} Класс: {best_match.class_name.value}\n"
             f"🎂 Возраст: {best_match.age}\n🏙️ Город: {best_match.city}\n"
-            f"🏷️ **Общих тегов: {best_score}**\n{partner_tags_text}\n\nГотов отправиться в приключение?",
+            f"🏷️ **Общих тегов: {best_score}**\n{partner_tags_text}\n\nГотов отправиться?",
             reply_markup=ready_kb())
         try:
             await bot.send_message(chat_id=best_match.tg_id, text=(
                 f"🎉 **Найден напарник!**\n\n👤 **{user.username}**\n"
                 f"{CLASS_EMOJI[user.class_name.value]} Класс: {user.class_name.value}\n"
                 f"🎂 Возраст: {user.age}\n🏙️ Город: {user.city}\n"
-                f"🏷️ **Общих тегов: {best_score}**\n{my_tags_text}\n\nГотов отправиться в приключение?"
+                f"🏷️ **Общих тегов: {best_score}**\n{my_tags_text}\n\nГотов отправиться?"
             ), reply_markup=ready_kb())
-        except Exception as e:
-            print(f"⚠️ {e}")
+        except Exception as e: print(f"⚠️ {e}")
     await call.answer()
 
-# ---------- ГОТОВНОСТЬ И СТАРТ ДАНЖА ----------
+# ========== ГОТОВНОСТЬ ==========
 @dp.callback_query(F.data == "ready")
 async def ready_handler(call: CallbackQuery):
     with SessionLocal() as db:
@@ -751,7 +873,7 @@ async def ready_handler(call: CallbackQuery):
         user.is_ready = True; db.commit()
         partner = db.execute(select(User).where(User.tg_id == user.partner_tg_id)).scalar_one_or_none()
         if not partner or not partner.is_ready:
-            await call.message.edit_text("⏳ **Ждём напарника...**\n\nКак только он подтвердит готовность — начнётся приключение!")
+            await call.message.edit_text("⏳ **Ждём напарника...**")
             await call.answer(); return
         user.status = "dungeon"; partner.status = "dungeon"
         theme_key = random.choice(list(DUNGEONS.keys()))
@@ -760,53 +882,60 @@ async def ready_handler(call: CallbackQuery):
         db.add(session); db.commit()
         theme = DUNGEONS[theme_key]
         q = theme["phases"][0]["questions"][0]
-        intro = (
-            f"🎲 **Тема: {theme['name']}**\n"
-            f"📍 Фаза 1/3 — {theme['phases'][0]['name']}\n"
-            f"📊 Вопрос 1/{len(theme['phases'][0]['questions'])}\n\n"
-            f"{q['text']}"
-        )
+        total_q = len(theme["phases"][0]["questions"])
+        intro = (f"🎲 **Тема: {theme['name']}**\n"
+                 f"📍 Фаза 1/3 — {theme['phases'][0]['name']}\n"
+                 f"📊 Вопрос 1/{total_q}\n\n{q['text']}")
         kb = dungeon_answer_kb(theme_key, 0, 0)
-        try:
-            await call.message.edit_text(intro, reply_markup=kb)
-        except Exception:
-            await call.message.answer(intro, reply_markup=kb)
-        try:
-            await bot.send_message(chat_id=partner.tg_id, text=intro, reply_markup=kb)
-        except Exception as e:
-            print(f"⚠️ {e}")
+        try: await call.message.edit_text(intro, reply_markup=kb)
+        except Exception: await call.message.answer(intro, reply_markup=kb)
+        try: await bot.send_message(chat_id=partner.tg_id, text=intro, reply_markup=kb)
+        except Exception as e: print(f"⚠️ {e}")
+        asyncio.create_task(dungeon_timeout(session.id, 0))
     await call.answer()
 
-# ---------- ОТВЕТЫ В ДАНЖЕ ----------
+async def dungeon_timeout(session_id, question_idx):
+    await asyncio.sleep(300)
+    with SessionLocal() as db:
+        session = db.execute(select(DungeonSession).where(DungeonSession.id == session_id)).scalar_one_or_none()
+        if not session or session.status != "active": return
+        if session.current_question != question_idx: return
+        session.status = "finished"
+        p1 = db.execute(select(User).where(User.tg_id == session.player1_tg_id)).scalar_one_or_none()
+        p2 = db.execute(select(User).where(User.tg_id == session.player2_tg_id)).scalar_one_or_none()
+        if p1: p1.status = "idle"; p1.partner_tg_id = None; p1.is_ready = False
+        if p2: p2.status = "idle"; p2.partner_tg_id = None; p2.is_ready = False
+        db.commit()
+        text = "⏰ Напарник не ответил. Что-то пошло не так... Вы возвращаетесь в поиск подземелья."
+        try: await bot.send_message(chat_id=session.player1_tg_id, text=text, reply_markup=main_menu())
+        except: pass
+        try: await bot.send_message(chat_id=session.player2_tg_id, text=text, reply_markup=main_menu())
+        except: pass
+
+# ========== ОТВЕТЫ В ДАНЖЕ ==========
 @dp.callback_query(F.data.startswith("da_"))
 async def dungeon_answer(call: CallbackQuery):
     parts = call.data.split("_")
     theme_key, phase_idx, q_idx, ans_idx = parts[1], int(parts[2]), int(parts[3]), int(parts[4])
     with SessionLocal() as db:
         user = db.execute(select(User).where(User.tg_id == call.from_user.id)).scalar_one_or_none()
-        if not user:
-            await call.answer("❌ Ошибка", show_alert=True); return
+        if not user: await call.answer("❌ Ошибка", show_alert=True); return
         session = db.execute(select(DungeonSession).where(
             DungeonSession.status == "active",
             ((DungeonSession.player1_tg_id == user.tg_id) | (DungeonSession.player2_tg_id == user.tg_id))
         )).scalars().first()
-        if not session:
-            await call.answer("❌ Сессия не найдена", show_alert=True); return
+        if not session: await call.answer("❌ Сессия не найдена", show_alert=True); return
         if session.theme_key != theme_key or session.current_phase != phase_idx + 1 or session.current_question != q_idx:
             await call.answer("⏳ Уже идёт другой вопрос", show_alert=True); return
         if session.player1_tg_id == user.tg_id:
-            if session.player1_ready:
-                await call.answer("✅ Ты уже ответил", show_alert=True); return
+            if session.player1_ready: await call.answer("✅ Уже ответил", show_alert=True); return
             session.player1_answer = ans_idx; session.player1_ready = True
         else:
-            if session.player2_ready:
-                await call.answer("✅ Ты уже ответил", show_alert=True); return
+            if session.player2_ready: await call.answer("✅ Уже ответил", show_alert=True); return
             session.player2_answer = ans_idx; session.player2_ready = True
         db.commit()
         q = DUNGEONS[theme_key]["phases"][phase_idx]["questions"][q_idx]
-        await call.message.edit_text(
-            f"✅ Твой выбор: **{q['options'][ans_idx]['text']}**\n\n⏳ Ждём напарника..."
-        )
+        await call.message.edit_text(f"✅ Твой выбор: **{q['options'][ans_idx]['text']}**\n\n⏳ Ждём напарника...")
         await call.answer("Ответ сохранён!")
         if session.player1_ready and session.player2_ready:
             await process_question(db, session, theme_key, phase_idx, q_idx)
@@ -831,199 +960,159 @@ async def process_question(db, session, theme_key, phase_idx, q_idx):
     session.player1_ready = False; session.player2_ready = False
     session.player1_answer = None; session.player2_answer = None
     session.current_question += 1
-    theme = DUNGEONS[theme_key]
-    phase = theme["phases"][phase_idx]
+    theme = DUNGEONS[theme_key]; phase = theme["phases"][phase_idx]
     total_q = len(phase["questions"])
-    # Конец фазы?
     if session.current_question >= total_q:
         if phase_idx == 0:
-            # КОНЕЦ 1-Й ФАЗЫ
             db.commit()
             await send_end_of_phase_1(session, theme_key, bridge)
             return
         elif phase_idx == 1:
-            # КОНЕЦ 2-Й ФАЗЫ
-            session.msg_stage = 0
-            session.player1_msg = None; session.player2_msg = None
+            session.msg_stage = 0; session.player1_msg = None; session.player2_msg = None
             db.commit()
             await send_end_of_phase_2(session, theme_key, bridge)
             return
         else:
-            # КОНЕЦ 3-Й ФАЗЫ
             session.status = "finished"
             p1 = db.execute(select(User).where(User.tg_id == session.player1_tg_id)).scalar_one_or_none()
             p2 = db.execute(select(User).where(User.tg_id == session.player2_tg_id)).scalar_one_or_none()
-            if p1: p1.status = "idle"; p1.partner_tg_id = None; p1.is_ready = False; p1.full_dungeons = (p1.full_dungeons or 0) + 1
-            if p2: p2.status = "idle"; p2.partner_tg_id = None; p2.is_ready = False; p2.full_dungeons = (p2.full_dungeons or 0) + 1
+            exp_gain = (session.phase1_matches + session.phase2_matches + session.phase3_matches) * 10
+            if p1:
+                p1.status = "idle"; p1.partner_tg_id = None; p1.is_ready = False
+                p1.full_dungeons = (p1.full_dungeons or 0) + 1
+                p1.experience = (p1.experience or 0) + exp_gain
+                p1.level = calculate_level(p1.experience)
+            if p2:
+                p2.status = "idle"; p2.partner_tg_id = None; p2.is_ready = False
+                p2.full_dungeons = (p2.full_dungeons or 0) + 1
+                p2.experience = (p2.experience or 0) + exp_gain
+                p2.level = calculate_level(p2.experience)
             db.commit()
-            await send_final(session, p1, p2, theme_key)
+            await send_final(session, p1, p2, theme_key, exp_gain)
             return
-    # Продолжение фазы
     next_q = phase["questions"][session.current_question]
-    next_text = (
-        f"{bridge}\n\n"
-        f"📍 Фаза {phase_idx + 1}/3 — {phase['name']}\n"
-        f"📊 Вопрос {session.current_question + 1}/{total_q}\n\n"
-        f"{next_q['text']}"
-    )
+    next_text = (f"{bridge}\n\n📍 Фаза {phase_idx + 1}/3 — {phase['name']}\n"
+                 f"📊 Вопрос {session.current_question + 1}/{total_q}\n\n{next_q['text']}")
     next_kb = dungeon_answer_kb(theme_key, phase_idx, session.current_question)
     db.commit()
-    try:
-        await bot.send_message(chat_id=session.player1_tg_id, text=next_text, reply_markup=next_kb)
+    try: await bot.send_message(chat_id=session.player1_tg_id, text=next_text, reply_markup=next_kb)
     except Exception as e: print(f"⚠️ {e}")
-    try:
-        await bot.send_message(chat_id=session.player2_tg_id, text=next_text, reply_markup=next_kb)
+    try: await bot.send_message(chat_id=session.player2_tg_id, text=next_text, reply_markup=next_kb)
     except Exception as e: print(f"⚠️ {e}")
 
 async def send_end_of_phase_1(session, theme_key, bridge):
     with SessionLocal() as db:
         p1 = db.execute(select(User).where(User.tg_id == session.player1_tg_id)).scalar_one_or_none()
         p2 = db.execute(select(User).where(User.tg_id == session.player2_tg_id)).scalar_one_or_none()
-        text_to_p1 = (
-            f"{bridge}\n\n"
-            f"🏁 **Фаза 1 пройдена!**\n\n"
-            f"🔑 **Ключ напарника:**\n_{p2.key_text if p2 else 'не указан'}_\n\n"
-            f"Готов продолжить приключение?"
-        )
-        text_to_p2 = (
-            f"{bridge}\n\n"
-            f"🏁 **Фаза 1 пройдена!**\n\n"
-            f"🔑 **Ключ напарника:**\n_{p1.key_text if p1 else 'не указан'}_\n\n"
-            f"Готов продолжить приключение?"
-        )
+        text_to_p1 = (f"{bridge}\n\n🏁 **Фаза 1 пройдена!**\n\n"
+                      f"🔑 **Ключ напарника:**\n_{p2.key_text if p2 else 'не указан'}_\n\nГотов продолжить?")
+        text_to_p2 = (f"{bridge}\n\n🏁 **Фаза 1 пройдена!**\n\n"
+                      f"🔑 **Ключ напарника:**\n_{p1.key_text if p1 else 'не указан'}_\n\nГотов продолжить?")
         try: await bot.send_message(chat_id=session.player1_tg_id, text=text_to_p1, reply_markup=continue_kb())
-        except Exception as e: print(f"⚠️ {e}")
+        except: pass
         try: await bot.send_message(chat_id=session.player2_tg_id, text=text_to_p2, reply_markup=continue_kb())
-        except Exception as e: print(f"⚠️ {e}")
+        except: pass
 
 async def send_end_of_phase_2(session, theme_key, bridge):
-    text = (
-        f"{bridge}\n\n"
-        f"🏁 **Фаза 2 пройдена!**\n\n"
-        f"💬 **У тебя ОДНО сообщение для напарника.**\n"
-        f"Напиши что-то, что заставит его ответить. До 200 символов.\n\n"
-        f"Просто отправь текст боту — он передаст напарнику."
-    )
+    text = (f"{bridge}\n\n🏁 **Фаза 2 пройдена!**\n\n"
+            f"💬 **У тебя ОДНО сообщение для напарника.**\n"
+            f"Напиши что-то, что заставит его ответить. До 200 символов.\n\n"
+            f"Просто отправь текст боту — он передаст напарнику.")
     try: await bot.send_message(chat_id=session.player1_tg_id, text=text)
-    except Exception as e: print(f"⚠️ {e}")
+    except: pass
     try: await bot.send_message(chat_id=session.player2_tg_id, text=text)
-    except Exception as e: print(f"⚠️ {e}")
+    except: pass
 
-async def send_final(session, p1, p2, theme_key):
+async def send_final(session, p1, p2, theme_key, exp_gain):
     total = 11
     matches = session.phase1_matches + session.phase2_matches + session.phase3_matches
     percent = int(matches / total * 100)
     if percent >= 90:
-        verdict = "✨ **Идеальный резонанс!**\n\nВы словно одна душа в двух телах. Такое встречается редко — не упустите друг друга."
+        verdict = "✨ **Идеальный резонанс!**\n\nВы словно одна душа в двух телах."
     elif percent >= 70:
-        verdict = "💫 **Сильный синхрон!**\n\nУ вас много общего. Это отличная основа для настоящего знакомства."
+        verdict = "💫 **Сильный синхрон!**\n\nУ вас много общего."
     elif percent >= 50:
-        verdict = "🤔 **Есть точки соприкосновения.**\n\nВы разные — но в этом и интерес. Есть о чём поговорить."
+        verdict = "🤔 **Есть точки соприкосновения.**\n\nВы разные — но в этом и интерес."
     else:
-        verdict = "💎 **Вы настолько неповторимы, что найти похожего — почти невозможно.**\n\nЭто как раз тот случай. Может быть, именно поэтому вам стоит узнать друг друга поближе?"
+        verdict = "💎 **Вы настолько неповторимы, что найти похожего — почти невозможно.**\n\nЭто как раз тот случай."
     if percent >= 50 and p1 and p2:
-        contacts = f"\n\n📞 **Держите связь:**\n• {p1.username}\n• {p2.username}\n\nНапишите друг другу, не теряйтесь!"
+        contacts = f"\n\n📞 **Держите связь:**\n• {p1.username}\n• {p2.username}\n\nНапишите друг другу!"
     else:
         contacts = "\n\n💭 Если захотите — попробуйте пройти другой данж вместе."
-    final_text = (
-        f"🏁 **Данж завершён!**\n\n"
-        f"💫 Синхрон: **{percent}%**\n"
-        f"✅ Совпадений: **{matches} из {total}**\n\n"
-        f"{verdict}{contacts}"
-    )
+    final_text = (f"🏁 **Данж завершён!**\n\n"
+                  f"💫 Синхрон: **{percent}%**\n"
+                  f"✅ Совпадений: **{matches} из {total}**\n"
+                  f"⭐ Опыт: **+{exp_gain}**\n\n"
+                  f"{verdict}{contacts}")
     try: await bot.send_message(chat_id=session.player1_tg_id, text=final_text, reply_markup=main_menu())
-    except Exception as e: print(f"⚠️ {e}")
+    except: pass
     try: await bot.send_message(chat_id=session.player2_tg_id, text=final_text, reply_markup=main_menu())
-    except Exception as e: print(f"⚠️ {e}")
+    except: pass
 
-# ---------- ОБРАБОТКА СООБЩЕНИЙ (между 2 и 3 фазой) ----------
+# ========== ОБРАБОТКА СООБЩЕНИЙ ==========
 @dp.message()
 async def handle_text_message(msg: Message, state: FSMContext):
-    # Пропускаем команды
-    if msg.text and msg.text.startswith("/"):
-        return
-    if not msg.text:
-        return
+    if msg.text and msg.text.startswith("/"): return
+    if not msg.text: return
     with SessionLocal() as db:
         user = db.execute(select(User).where(User.tg_id == msg.from_user.id)).scalar_one_or_none()
-        if not user or user.status != "dungeon":
-            return
+        if not user or user.status != "dungeon": return
         session = db.execute(select(DungeonSession).where(
             DungeonSession.status == "active",
             ((DungeonSession.player1_tg_id == user.tg_id) | (DungeonSession.player2_tg_id == user.tg_id))
         )).scalars().first()
-        if not session:
-            return
+        if not session: return
         if session.current_phase != 2:
-            await msg.answer("✉️ Сейчас не время для сообщений. Отвечай на вопросы.")
-            return
+            await msg.answer("✉️ Сейчас не время для сообщений."); return
         if session.msg_stage == 2:
-            await msg.answer("✉️ Вы уже обменялись сообщениями.")
-            return
+            await msg.answer("✉️ Вы уже обменялись сообщениями."); return
         text = msg.text.strip()[:200]
         is_p1 = (session.player1_tg_id == user.tg_id)
         if is_p1 and session.player1_msg:
-            await msg.answer("✉️ Ты уже написал сообщение."); return
+            await msg.answer("✉️ Ты уже написал."); return
         if not is_p1 and session.player2_msg:
-            await msg.answer("✉️ Ты уже написал сообщение."); return
+            await msg.answer("✉️ Ты уже написал."); return
         if is_p1:
-            session.player1_msg = text
-            partner_id = session.player2_tg_id
+            session.player1_msg = text; partner_id = session.player2_tg_id
         else:
-            session.player2_msg = text
-            partner_id = session.player1_tg_id
+            session.player2_msg = text; partner_id = session.player1_tg_id
         session.msg_stage += 1
         db.commit()
-        await msg.answer("✅ Твоё сообщение отправлено напарнику.")
-        try:
-            await bot.send_message(chat_id=partner_id, text=f"💬 **Сообщение от напарника:**\n\n_{text}_")
-        except Exception as e:
-            print(f"⚠️ {e}")
-        # Оба написали?
+        await msg.answer("✅ Сообщение отправлено напарнику.")
+        try: await bot.send_message(chat_id=partner_id, text=f"💬 **Сообщение от напарника:**\n\n_{text}_")
+        except: pass
         if session.player1_msg and session.player2_msg:
-            next_phase_text = (
-                f"💬 **Вы обменялись сообщениями!**\n\n"
-                f"Напарник написал:\n_{session.player2_msg if is_p1 else session.player1_msg}_\n\n"
-                f"Готов продолжить приключение?"
-            )
-            try:
-                await bot.send_message(chat_id=session.player1_tg_id, text=next_phase_text, reply_markup=continue_kb())
-            except Exception as e: print(f"⚠️ {e}")
-            try:
-                await bot.send_message(chat_id=session.player2_tg_id, text=next_phase_text, reply_markup=continue_kb())
-            except Exception as e: print(f"⚠️ {e}")
+            next_text = (f"💬 **Вы обменялись сообщениями!**\n\n"
+                         f"Напарник написал:\n_{session.player2_msg if is_p1 else session.player1_msg}_\n\nГотов продолжить?")
+            try: await bot.send_message(chat_id=session.player1_tg_id, text=next_text, reply_markup=continue_kb())
+            except: pass
+            try: await bot.send_message(chat_id=session.player2_tg_id, text=next_text, reply_markup=continue_kb())
+            except: pass
 
-# ---------- ПРОДОЛЖЕНИЕ ДАНЖА ----------
+# ========== ПРОДОЛЖЕНИЕ ==========
 @dp.callback_query(F.data == "dungeon_continue")
 async def dungeon_continue(call: CallbackQuery):
     with SessionLocal() as db:
         user = db.execute(select(User).where(User.tg_id == call.from_user.id)).scalar_one_or_none()
-        if not user:
-            await call.answer(); return
+        if not user: await call.answer(); return
         session = db.execute(select(DungeonSession).where(
             DungeonSession.status == "active",
             ((DungeonSession.player1_tg_id == user.tg_id) | (DungeonSession.player2_tg_id == user.tg_id))
         )).scalars().first()
-        if not session:
-            await call.answer("❌ Сессия не найдена", show_alert=True); return
-        # Если закончилась 1-я фаза — двигаемся во 2-ю
+        if not session: await call.answer("❌ Сессия не найдена", show_alert=True); return
         if session.current_phase == 1 and session.current_question >= len(DUNGEONS[session.theme_key]["phases"][0]["questions"]):
             session.current_phase = 2; session.current_question = 0
             session.player1_ready = False; session.player2_ready = False
             db.commit()
             theme = DUNGEONS[session.theme_key]
             q = theme["phases"][1]["questions"][0]
-            text = (
-                f"⚔️ **Фаза 2/3 — {theme['phases'][1]['name']}**\n"
-                f"📊 Вопрос 1/{len(theme['phases'][1]['questions'])}\n\n{q['text']}"
-            )
+            text = f"⚔️ **Фаза 2/3 — {theme['phases'][1]['name']}**\n📊 Вопрос 1/{len(theme['phases'][1]['questions'])}\n\n{q['text']}"
             kb = dungeon_answer_kb(session.theme_key, 1, 0)
             await call.message.edit_text("⚔️ Идём дальше...")
             try: await bot.send_message(chat_id=session.player1_tg_id, text=text, reply_markup=kb)
-            except Exception as e: print(f"⚠️ {e}")
+            except: pass
             try: await bot.send_message(chat_id=session.player2_tg_id, text=text, reply_markup=kb)
-            except Exception as e: print(f"⚠️ {e}")
-        # Если закончилась 2-я фаза (msg_stage=2) — двигаемся в 3-ю
+            except: pass
         elif session.current_phase == 2 and session.msg_stage == 2:
             session.current_phase = 3; session.current_question = 0
             session.player1_ready = False; session.player2_ready = False
@@ -1031,47 +1120,40 @@ async def dungeon_continue(call: CallbackQuery):
             db.commit()
             theme = DUNGEONS[session.theme_key]
             q = theme["phases"][2]["questions"][0]
-            text = (
-                f"⚔️ **Фаза 3/3 — {theme['phases'][2]['name']}**\n"
-                f"📊 Вопрос 1/{len(theme['phases'][2]['questions'])}\n\n{q['text']}"
-            )
+            text = f"⚔️ **Фаза 3/3 — {theme['phases'][2]['name']}**\n📊 Вопрос 1/{len(theme['phases'][2]['questions'])}\n\n{q['text']}"
             kb = dungeon_answer_kb(session.theme_key, 2, 0)
             await call.message.edit_text("⚔️ Финальная фаза...")
             try: await bot.send_message(chat_id=session.player1_tg_id, text=text, reply_markup=kb)
-            except Exception as e: print(f"⚠️ {e}")
+            except: pass
             try: await bot.send_message(chat_id=session.player2_tg_id, text=text, reply_markup=kb)
-            except Exception as e: print(f"⚠️ {e}")
+            except: pass
         else:
             await call.answer("⏳ Ждём напарника", show_alert=True)
     await call.answer()
 
-# ---------- ВЫХОД С ПОДТВЕРЖДЕНИЕМ ----------
+# ========== ВЫХОД ==========
 @dp.callback_query(F.data == "dungeon_exit")
 async def dungeon_exit(call: CallbackQuery):
     await call.message.edit_text(
-        "⚠️ **Ты уверен, что хочешь покинуть приключение?**\n\n"
-        "Прогресс будет потерян. Напарник продолжит искать нового партнёра.",
-        reply_markup=confirm_exit_kb()
-    )
+        "⚠️ **Ты уверен, что хочешь покинуть приключение?**\n\nПрогресс будет потерян.",
+        reply_markup=confirm_exit_kb())
     await call.answer()
 
 @dp.callback_query(F.data == "dungeon_exit_cancel")
 async def dungeon_exit_cancel(call: CallbackQuery):
-    await call.message.edit_text("↩️ Возвращаемся в приключение...")
+    await call.message.edit_text("↩️ Возвращаемся...")
     await call.answer()
 
 @dp.callback_query(F.data == "dungeon_exit_confirm")
 async def dungeon_exit_confirm(call: CallbackQuery):
     with SessionLocal() as db:
         user = db.execute(select(User).where(User.tg_id == call.from_user.id)).scalar_one_or_none()
-        if not user:
-            await call.answer(); return
+        if not user: await call.answer(); return
         session = db.execute(select(DungeonSession).where(
             DungeonSession.status == "active",
             ((DungeonSession.player1_tg_id == user.tg_id) | (DungeonSession.player2_tg_id == user.tg_id))
         )).scalars().first()
-        if not session:
-            await call.answer(); return
+        if not session: await call.answer(); return
         session.status = "finished"
         partner_id = session.player2_tg_id if session.player1_tg_id == user.tg_id else session.player1_tg_id
         user.status = "idle"; user.partner_tg_id = None; user.is_ready = False
@@ -1080,22 +1162,16 @@ async def dungeon_exit_confirm(call: CallbackQuery):
         if partner:
             partner.status = "idle"; partner.partner_tg_id = None; partner.is_ready = False
         db.commit()
-        await call.message.edit_text("❌ Ты покинул приключение. Возвращайся, когда захочешь!", reply_markup=main_menu())
-        try:
-            await bot.send_message(chat_id=partner_id,
-                                   text="❌ Напарник покинул приключение. Ты снова свободен.",
-                                   reply_markup=main_menu())
-        except Exception as e:
-            print(f"⚠️ {e}")
+        await call.message.edit_text("❌ Ты покинул приключение.", reply_markup=main_menu())
+        try: await bot.send_message(chat_id=partner_id, text="❌ Напарник покинул приключение. Ты снова свободен.", reply_markup=main_menu())
+        except: pass
     await call.answer()
 
-# ---------- ОТМЕНА МАТЧА ----------
 @dp.callback_query(F.data == "cancel_match")
 async def cancel_match(call: CallbackQuery):
     with SessionLocal() as db:
         user = db.execute(select(User).where(User.tg_id == call.from_user.id)).scalar_one_or_none()
-        if not user:
-            await call.answer(); return
+        if not user: await call.answer(); return
         partner_id = user.partner_tg_id
         user.status = "idle"; user.partner_tg_id = None; user.is_ready = False
         if partner_id:
@@ -1103,15 +1179,13 @@ async def cancel_match(call: CallbackQuery):
             if partner:
                 partner.status = "idle"; partner.partner_tg_id = None; partner.is_ready = False
         db.commit()
-        await call.message.edit_text("❌ Поиск отменён. Можешь попробовать снова.")
+        await call.message.edit_text("❌ Поиск отменён.")
         await call.answer()
         if partner_id:
-            try:
-                await bot.send_message(chat_id=partner_id, text="❌ Напарник отменил поиск. Ты снова свободен.")
-            except Exception:
-                pass
+            try: await bot.send_message(chat_id=partner_id, text="❌ Напарник отменил поиск.")
+            except: pass
 
-# ---------- РЕДАКТИРОВАНИЕ ----------
+# ========== КОМАНДЫ ==========
 @dp.message(Command("setname"))
 async def setname(msg: Message):
     name = msg.text.replace("/setname", "").strip()
@@ -1119,8 +1193,7 @@ async def setname(msg: Message):
         await msg.answer("❌ Пример: /setname Артур"); return
     with SessionLocal() as db:
         user = db.execute(select(User).where(User.tg_id == msg.from_user.id)).scalar_one_or_none()
-        if not user:
-            await msg.answer("❌ Ты не зарегистрирован!"); return
+        if not user: await msg.answer("❌ Не зарегистрирован!"); return
         user.username = name; db.commit()
         await msg.answer(f"✅ Имя изменено на {name}")
 
@@ -1131,42 +1204,36 @@ async def setage(msg: Message):
         await msg.answer("❌ Пример: /setage 25"); return
     with SessionLocal() as db:
         user = db.execute(select(User).where(User.tg_id == msg.from_user.id)).scalar_one_or_none()
-        if not user:
-            await msg.answer("❌ Ты не зарегистрирован!"); return
+        if not user: await msg.answer("❌ Не зарегистрирован!"); return
         user.age = int(age); db.commit()
-        await msg.answer(f"✅ Возраст изменён на {age}")
+        await msg.answer(f"✅ Возраст: {age}")
 
 @dp.message(Command("setcity"))
 async def setcity(msg: Message):
     city = msg.text.replace("/setcity", "").strip()
-    if not city:
-        await msg.answer("❌ Пример: /setcity Москва"); return
+    if not city: await msg.answer("❌ Пример: /setcity Москва"); return
     with SessionLocal() as db:
         user = db.execute(select(User).where(User.tg_id == msg.from_user.id)).scalar_one_or_none()
-        if not user:
-            await msg.answer("❌ Ты не зарегистрирован!"); return
+        if not user: await msg.answer("❌ Не зарегистрирован!"); return
         user.city = city; db.commit()
-        await msg.answer(f"✅ Город изменён на {city}")
+        await msg.answer(f"✅ Город: {city}")
 
 @dp.message(Command("setkey"))
 async def setkey(msg: Message):
     key = msg.text.replace("/setkey", "").strip()
     if not key or len(key) < 5 or len(key) > 100:
-        await msg.answer("❌ Ключ от 5 до 100 символов. Пример: /setkey М/25, ищу друзей"); return
+        await msg.answer("❌ Ключ от 5 до 100 символов."); return
     with SessionLocal() as db:
         user = db.execute(select(User).where(User.tg_id == msg.from_user.id)).scalar_one_or_none()
-        if not user:
-            await msg.answer("❌ Ты не зарегистрирован!"); return
+        if not user: await msg.answer("❌ Не зарегистрирован!"); return
         user.key_text = key; db.commit()
         await msg.answer("✅ Ключ обновлён!")
 
-# ---------- СБРОС ----------
 @dp.message(Command("reset"))
 async def reset_status(msg: Message):
     with SessionLocal() as db:
         user = db.execute(select(User).where(User.tg_id == msg.from_user.id)).scalar_one_or_none()
-        if not user:
-            await msg.answer("❌ Ты не зарегистрирован!"); return
+        if not user: await msg.answer("❌ Не зарегистрирован!"); return
         sessions = db.execute(select(DungeonSession).where(
             DungeonSession.status == "active",
             ((DungeonSession.player1_tg_id == user.tg_id) | (DungeonSession.player2_tg_id == user.tg_id))
@@ -1174,14 +1241,49 @@ async def reset_status(msg: Message):
         for s in sessions: s.status = "finished"
         user.status = "idle"; user.partner_tg_id = None; user.is_ready = False
         db.commit()
-    await msg.answer("✅ Статус сброшен. Ты снова свободен!", reply_markup=main_menu())
+    await msg.answer("✅ Статус сброшен.", reply_markup=main_menu())
+
+@dp.message(Command("delete_me"))
+async def delete_me(msg: Message):
+    with SessionLocal() as db:
+        user = db.execute(select(User).where(User.tg_id == msg.from_user.id)).scalar_one_or_none()
+        if not user:
+            await msg.answer("❌ Ты не зарегистрирован!"); return
+        sessions = db.execute(select(DungeonSession).where(
+            (DungeonSession.player1_tg_id == user.tg_id) | (DungeonSession.player2_tg_id == user.tg_id)
+        )).scalars().all()
+        for s in sessions: db.delete(s)
+        tags = db.execute(select(UserTag).where(UserTag.user_id == user.id)).scalars().all()
+        for t in tags: db.delete(t)
+        db.delete(user)
+        db.commit()
+    await msg.answer(
+        "✅ **Аккаунт удалён.**\n\n"
+        "Все твои данные удалены из базы. Согласие отозвано.\n\n"
+        "Если захочешь вернуться — напиши /start."
+    )
+
+@dp.message(Command("support"))
+async def support_cmd(msg: Message):
+    await msg.answer(
+        f"📩 **Поддержка**\n\n"
+        f"Если у тебя возникли вопросы или проблемы — напиши нам:\n\n"
+        f"📧 Email: `{SUPPORT_EMAIL}`\n\n"
+        f"Мы постараемся ответить в течение 1-2 рабочих дней."
+    )
+
+@dp.message(Command("privacy"))
+async def privacy_cmd(msg: Message):
+    await msg.answer(
+        f"📄 **Политика конфиденциальности**\n\n{POLICY_URL}"
+    )
 
 # ========== ЗАПУСК ==========
 async def main():
     with SessionLocal() as db:
         active_sessions = db.execute(select(DungeonSession).where(DungeonSession.status == "active")).scalars().all()
         for s in active_sessions: s.status = "finished"
-        stuck = db.execute(select(User).where(User.status.in_(["dungeon", "matched", "searching", "waiting_msg"]))).scalars().all()
+        stuck = db.execute(select(User).where(User.status.in_(["dungeon", "matched", "searching"]))).scalars().all()
         for u in stuck:
             u.status = "idle"; u.partner_tg_id = None; u.is_ready = False
         db.commit()
