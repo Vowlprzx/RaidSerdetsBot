@@ -13,7 +13,6 @@ from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean, Da
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import select
-import enum
 import os
 from dotenv import load_dotenv
 
@@ -27,31 +26,27 @@ if not BOT_TOKEN:
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///database.db")
 logging.basicConfig(level=logging.INFO)
 
-# ========== КОНСТАНТЫ ==========
 POLICY_URL = "https://telegra.ph/Telegram-bota-Rejd-Serdec-10-05"
 SUPPORT_EMAIL = "igor_borysov@mail.ru"
+TURN_TIMEOUT_SECONDS = 300
 
 # ========== БАЗА ДАННЫХ ==========
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, connect_args={"sslmode": "require"})
 Base = declarative_base()
 SessionLocal = sessionmaker(bind=engine)
 
-class UserClass(enum.Enum):
-    RYTSAR = "Рыцарь"; TEMNYI_STRAZH = "Тёмный Страж"; VARVAR = "Варвар"
-    VOLSHEBNIK = "Волшебник"; INZHENER = "Инженер"; BARD = "Бард"
-    TEN = "Тень"; SLEDOPYT = "Следопыт"; ZHRETS = "Жрец"; DRUID = "Друид"
-
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True)
     tg_id = Column(BigInteger, unique=True, nullable=False)
     username = Column(String(64), unique=True, nullable=False)
-    class_name = Column(Enum(UserClass), nullable=False)
+    class_name = Column(String(64), nullable=False)  # теперь гибрид, не Enum
     level = Column(Integer, default=1)
     experience = Column(Integer, default=0)
     age = Column(Integer, nullable=True)
     city = Column(String(100), nullable=True)
-    key_text = Column(String(200), default="")
+    mayak_text = Column(String(200), default="")
+    red_flags = Column(String(300), default="")
     status = Column(String(20), default="idle")
     partner_tg_id = Column(BigInteger, nullable=True)
     is_ready = Column(Boolean, default=False)
@@ -88,9 +83,13 @@ class DungeonSession(Base):
     player1_msg = Column(String(200), nullable=True)
     player2_msg = Column(String(200), nullable=True)
     status = Column(String(20), default="active")
+    last_activity = Column(DateTime, default=datetime.datetime.utcnow)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
 Base.metadata.create_all(engine)
+# НА ОДИН ЗАПУСК (потом убрать):
+# Base.metadata.drop_all(engine)
+# Base.metadata.create_all(engine)
 
 # ========== УРОВНИ ==========
 LEVEL_THRESHOLDS = [(1, 0), (2, 100), (3, 300), (4, 700), (5, 1200)]
@@ -122,6 +121,26 @@ def progress_bar(current, total, length=8):
     filled = int((current / total) * length)
     filled = max(0, min(length, filled))
     return "▰" * filled + "▱" * (length - filled)
+
+# ========== КРАСНЫЕ ФЛАГИ ==========
+RED_FLAGS = [
+    "🚬 Курение",
+    "🍷 Алкоголь",
+    "🎮 Компьютерные игры (много)",
+    "📚 Саморазвитие (фанатичное)",
+    "🗣️ Постоянные голосовые",
+    "📵 Долгие ответы",
+    "🎉 Сверхобщительность",
+    "🤐 Замкнутость",
+]
+
+def red_flags_kb(selected):
+    rows = []
+    for i, t in enumerate(RED_FLAGS):
+        mark = "✅ " if i in selected else ""
+        rows.append([InlineKeyboardButton(text=f"{mark}{t}", callback_data=f"rf_{i}")])
+    rows.append([InlineKeyboardButton(text=f"✔️ Готово ({len(selected)}/3)", callback_data="rf_done")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 # ========== КЛАВИАТУРЫ ==========
 def consent_kb():
@@ -194,48 +213,173 @@ def tag_question_kb(tags, step):
         [InlineKeyboardButton(text=t, callback_data=f"tag_{step}_{i}")] for i, t in enumerate(tags)
     ] + [[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]])
 
-# ========== КВИЗ НА КЛАСС ==========
-QUESTIONS = [
-    {"text": "Ты заходишь в переполненную комнату. Твои действия?",
-     "options": {"Быстро найду знакомых или создам свою компанию.": {"Бард": 2},
-                 "Встану у стены и буду наблюдать.": {"Тень": 2},
-                 "Подойду к тому, кто выглядит потерянным, и помогу освоиться.": {"Жрец": 2},
-                 "Пройду к центру и заявлю о себе.": {"Рыцарь": 2}}},
-    {"text": "Ты нашёл старую карту сокровищ. Что сделаешь?",
-     "options": {"Сразу отправлюсь на поиски, не раздумывая.": {"Варвар": 2},
-                 "Изучу карту, проверю её подлинность.": {"Волшебник": 2},
-                 "Попытаюсь продать или обменять.": {"Бард": 2},
-                 "Позову друзей, чтобы идти вместе.": {"Рыцарь": 1, "Жрец": 1}}},
-    {"text": "Твой друг совершил ошибку, которая тебя подвела. Твоя реакция?",
-     "options": {"Прощу, ведь все ошибаются.": {"Жрец": 2},
-                 "Устрою разговор, чтобы выяснить причины.": {"Волшебник": 2},
-                 "Обижусь, но не покажу виду, буду действовать сам.": {"Тень": 2},
-                 "Скажу прямо, что так нельзя, и потребую исправить.": {"Рыцарь": 2},
-                 "Запомню этот урок и буду осторожнее в будущем.": {"Тёмный Страж": 2}}},
-    {"text": "Какой стиль отдыха тебе ближе?",
-     "options": {"Активный отдых на природе с палаткой и костром.": {"Следопыт": 2, "Варвар": 1},
-                 "Тихий вечер с книгой или музыкой.": {"Волшебник": 2, "Жрец": 1},
-                 "Вечеринка с друзьями в шумной компании.": {"Бард": 2},
-                 "Прогулка по городу, изучение новых мест.": {"Инженер": 2, "Бард": 1}}},
-    {"text": "Ты оказался в опасной ситуации. Кто может тебе помочь?",
-     "options": {"Моя интуиция и быстрая реакция.": {"Варвар": 2},
-                 "Разум и холодный расчёт.": {"Волшебник": 2},
-                 "Надёжный друг, которому я доверяю.": {"Рыцарь": 2, "Жрец": 1},
-                 "Мои скрытые таланты и ловкость.": {"Бард": 2, "Тень": 1},
-                 "Моя выдержка и умение ждать.": {"Тёмный Страж": 2}}},
-    {"text": "Как ты относишься к правилам?",
-     "options": {"Правила созданы, чтобы их уважать и следовать им.": {"Рыцарь": 2, "Жрец": 1},
-                 "Правила — это ограничения, которые можно обойти.": {"Бард": 2},
-                 "Правила интересно изучать, чтобы понять их суть.": {"Волшебник": 2, "Инженер": 1},
-                 "Правила пишутся под ситуацию, я действую по обстоятельствам.": {"Варвар": 2, "Следопыт": 1},
-                 "Я следую своему кодексу, даже если он противоречит общим правилам.": {"Тёмный Страж": 2}}},
-    {"text": "Какое качество ты ценишь в людях больше всего?",
-     "options": {"Честность.": {"Рыцарь": 2, "Тёмный Страж": 1},
-                 "Ум.": {"Волшебник": 2, "Инженер": 1},
-                 "Доброту.": {"Жрец": 2, "Друид": 1},
-                 "Чувство юмора.": {"Бард": 2},
-                 "Свободу и независимость.": {"Следопыт": 2, "Варвар": 1}}}
+# ========== КВИЗ 5×5 ==========
+QUIZ = [
+    {"text": "🚪 Ты заходишь в переполненную комнату. Что делаешь?",
+     "options": [
+         ("Сразу иду знакомиться и заявляю о себе", "Бард"),
+         ("Встаю в стороне и наблюдаю", "Тень"),
+         ("Иду к тому, кто выглядит одиноким", "Жрец"),
+         ("Прохожу к центру, веду себя уверенно", "Рыцарь"),
+         ("Оцениваю обстановку, выбираю выгодную позицию", "Тёмный Страж"),
+     ]},
+    {"text": "🗺️ Ты нашёл старую карту сокровищ. Что сделаешь?",
+     "options": [
+         ("Сразу отправляюсь на поиски", "Варвар"),
+         ("Изучаю карту, проверяю подлинность", "Волшебник"),
+         ("Составляю план и черчу маршрут", "Инженер"),
+         ("Пытаюсь продать или обменять", "Бард"),
+         ("Иду в одиночку, без лишних глаз", "Следопыт"),
+     ]},
+    {"text": "💔 Друг подвёл тебя. Твоя реакция?",
+     "options": [
+         ("Прощаю — все ошибаются", "Жрец"),
+         ("Разбираюсь, почему так вышло", "Волшебник"),
+         ("Обижаюсь, но виду не подаю", "Тень"),
+         ("Говорю прямо, требую исправить", "Рыцарь"),
+         ("Удаляю из жизни, как сухую ветку", "Друид"),
+     ]},
+    {"text": "🏕️ Какой отдых тебе ближе?",
+     "options": [
+         ("Поход с палаткой и костром", "Следопыт"),
+         ("Экстремальные виды спорта, адреналин", "Варвар"),
+         ("Вечеринка с друзьями до утра", "Бард"),
+         ("Прогулка по городу, изучение нового", "Инженер"),
+         ("Уединение вдали от всех", "Друид"),
+     ]},
+    {"text": "💎 Что ценишь в людях больше всего?",
+     "options": [
+         ("Честность", "Рыцарь"),
+         ("Ум", "Волшебник"),
+         ("Доброту", "Жрец"),
+         ("Верность", "Тёмный Страж"),
+         ("Свободу", "Друид"),
+     ]},
 ]
+
+# ========== 45 ГИБРИДОВ ==========
+# Ключ — отсортированный кортеж из двух классов
+HYBRIDS = {
+    # С Рыцарем
+    tuple(sorted(["Рыцарь", "Жрец"])): ("🛡️ Паладин", "Ты — свет в броне. Честь и вера ведут тебя. Ты защищаешь не только тела, но и души."),
+    tuple(sorted(["Рыцарь", "Варвар"])): ("⚔️ Берсерк", "Ты — ярость в броне. Честь у тебя в крови, но когда враг перед тобой — ты не сдерживаешься."),
+    tuple(sorted(["Рыцарь", "Тёмный Страж"])): ("💀 Палач", "Ты — судьба предателей. Ты веришь в справедливость, но не ждёшь, пока её свершит кто-то другой."),
+    tuple(sorted(["Рыцарь", "Волшебник"])): ("✨ Магистр", "Ты — клинок и посох. Ты равно опасен в бою и в зале знаний. Никто не знает, чего от тебя ждать."),
+    tuple(sorted(["Рыцарь", "Инженер"])): ("⚙️ Рыцарь-механик", "Ты — кузнец своей судьбы. Ты чтишь долг и умеешь чинить то, что сломано."),
+    tuple(sorted(["Рыцарь", "Бард"])): ("🎭 Рыцарь-поэт", "Ты — слово и меч. Твоя честь звучит в песнях. Тебя любят и боятся одновременно."),
+    tuple(sorted(["Рыцарь", "Тень"])): ("🌒 Ночной страж", "Ты — щит в темноте. Ты защищаешь, но не ждёшь благодарности. Тебя видят только те, кому ты помог."),
+    tuple(sorted(["Рыцарь", "Следопыт"])): ("🏹 Рыцарь-разведчик", "Ты — честь на дороге. Ты идёшь впереди, разведуешь путь и защищаешь тех, кто идёт следом."),
+    tuple(sorted(["Рыцарь", "Друид"])): ("🌳 Хранитель рощи", "Ты — долг перед природой. Ты защищаешь не только людей, но и лес, из которого пришёл."),
+    # С Тёмным Стражем
+    tuple(sorted(["Тёмный Страж", "Варвар"])): ("🔥 Кровопийца", "Ты — чистая ярость. Ты не ищешь оправданий. Ты идёшь и берёшь то, что считаешь своим."),
+    tuple(sorted(["Тёмный Страж", "Волшебник"])): ("🖤 Некромант", "Ты — смерть и знание. Ты не боишься тьмы. Ты её изучаешь."),
+    tuple(sorted(["Тёмный Страж", "Инженер"])): ("⚙️ Инквизитор", "Ты — машина возмездия. Ты холоден, точен и неотвратим."),
+    tuple(sorted(["Тёмный Страж", "Бард"])): ("🎭 Искуситель", "Ты — слово и тьма. Ты умеешь убеждать, и никто не понимает, где ты врёшь."),
+    tuple(sorted(["Тёмный Страж", "Тень"])): ("🌑 Призрак", "Ты — неуловимый мститель. Тебя нет, но твоё возмездие — есть."),
+    tuple(sorted(["Тёмный Страж", "Следопыт"])): ("🏹 Каратель", "Ты — охота на зло. Ты находишь тех, кто заслужил смерть, и не промахиваешься."),
+    tuple(sorted(["Тёмный Страж", "Жрец"])): ("⚖️ Судья", "Ты — строгость и вера. Ты веришь в высшую справедливость и не прощаешь грехи."),
+    tuple(sorted(["Тёмный Страж", "Друид"])): ("🍂 Тёмный друид", "Ты — природа и смерть. Ты знаешь, что всё живое умирает, и не боишься этого."),
+    # С Варваром
+    tuple(sorted(["Варвар", "Волшебник"])): ("🔮 Шаман", "Ты — дикая магия. Ты не читаешь заклинания из книг — ты чувствуешь их в крови."),
+    tuple(sorted(["Варвар", "Инженер"])): ("🔨 Кузнец", "Ты — сила и мастерство. Ты создаёшь оружие, а потом проверяешь его в бою."),
+    tuple(sorted(["Варвар", "Бард"])): ("🥁 Скальд", "Ты — слава и ярость. Ты поёшь о своих подвигах и не преувеличиваешь."),
+    tuple(sorted(["Варвар", "Тень"])): ("🌪️ Дикарь", "Ты — инстинкты. Ты не думаешь — ты знаешь. И ты всегда знаешь, где спрятаться."),
+    tuple(sorted(["Варвар", "Следопыт"])): ("🐺 Зверолов", "Ты — охота и сила. Ты читаешь следы, как книгу, и бьёшь, как медведь."),
+    tuple(sorted(["Варвар", "Жрец"])): ("🩸 Кровавый жрец", "Ты — ярость и вера. Ты веришь, что боги любят тех, кто сражается."),
+    tuple(sorted(["Варвар", "Друид"])): ("🐻 Берсерк природы", "Ты — первобытная сила. Ты понимаешь зверей лучше, чем людей."),
+    # С Волшебником
+    tuple(sorted(["Волшебник", "Инженер"])): ("🔬 Артефактор", "Ты — магия и наука. Ты создаёшь чудеса руками, а не заклинаниями."),
+    tuple(sorted(["Волшебник", "Бард"])): ("🎼 Маэстро", "Ты — магия слова. Ты управляешь толпой так же легко, как стихиями."),
+    tuple(sorted(["Волшебник", "Тень"])): ("🌫️ Иллюзионист", "Ты — магия скрытности. Ты знаешь, что лучшая иллюзия — та, которую никто не заметил."),
+    tuple(sorted(["Волшебник", "Следопыт"])): ("🔭 Провидец", "Ты — магия пути. Ты видишь будущее и умеешь находить дорогу там, где её нет."),
+    tuple(sorted(["Волшебник", "Жрец"])): ("📿 Мистик", "Ты — магия и вера. Ты знаешь, что боги — это просто очень старые волшебники."),
+    tuple(sorted(["Волшебник", "Друид"])): ("🌿 Друид-маг", "Ты — природа и знание. Ты понимаешь язык деревьев и говоришь с ними на равных."),
+    # С Инженером
+    tuple(sorted(["Инженер", "Бард"])): ("🎪 Изобретатель", "Ты — наука и шоу. Ты создаёшь чудеса и заставляешь людей в них верить."),
+    tuple(sorted(["Инженер", "Тень"])): ("🗝️ Взломщик", "Ты — механика скрытности. Ты открываешь любые замки, даже те, что внутри людей."),
+    tuple(sorted(["Инженер", "Следопыт"])): ("🧭 Картограф", "Ты — наука пути. Ты чертишь карты там, где ещё никто не был."),
+    tuple(sorted(["Инженер", "Жрец"])): ("⚗️ Алхимик", "Ты — наука и вера. Ты превращаешь свинец в золото и воду в вино."),
+    tuple(sorted(["Инженер", "Друид"])): ("🌱 Садовник", "Ты — природа и техника. Ты выращиваешь лес так, как другие строят дома."),
+    # С Бардом
+    tuple(sorted(["Бард", "Тень"])): ("🎩 Интриган", "Ты — обаяние и хитрость. Ты улыбаешься, а в это время считаешь чужие слабости."),
+    tuple(sorted(["Бард", "Следопыт"])): ("🎻 Странник", "Ты — песнь дорог. Ты не ищешь дом — ты ищешь историю, которую расскажешь."),
+    tuple(sorted(["Бард", "Жрец"])): ("🕊️ Проповедник", "Ты — слово и вера. Ты говоришь так, что даже боги слушают."),
+    tuple(sorted(["Бард", "Друид"])): ("🍃 Лесной бард", "Ты — песнь природы. Ты поёшь на языке, которого никто не понимает, но все чувствуют."),
+    # С Тенью
+    tuple(sorted(["Тень", "Следопыт"])): ("🌲 Лазутчик", "Ты — тихий охотник. Ты видишь всё, но тебя не видит никто."),
+    tuple(sorted(["Тень", "Жрец"])): ("🕯️ Служитель тайн", "Ты — скрытая вера. Ты служишь тому, о чём не говорят вслух."),
+    tuple(sorted(["Тень", "Друид"])): ("🌑 Ночной друид", "Ты — тайны природы. Ты знаешь, что лес шепчет тем, кто умеет слушать."),
+    # С Следопытом
+    tuple(sorted(["Следопыт", "Жрец"])): ("🏕️ Пилигрим", "Ты — путь и вера. Ты идёшь не ради цели, а ради того, что найдёшь по дороге."),
+    tuple(sorted(["Следопыт", "Друид"])): ("🦌 Хранитель леса", "Ты — природа и путь. Ты защищаешь лес, потому что он — твой дом."),
+    # С Жрецом
+    tuple(sorted(["Жрец", "Друид"])): ("☯️ Шаман веры", "Ты — природа и вера. Ты не молишься в храмах — ты молишься в лесу."),
+}
+
+ALL_CLASSES = ["Рыцарь", "Тёмный Страж", "Варвар", "Волшебник", "Инженер",
+               "Бард", "Тень", "Следопыт", "Жрец", "Друид"]
+
+def get_hybrid_class(scores):
+    """Определяет гибрид по баллам. Возвращает (название, описание)."""
+    # Сортируем: сначала по баллам (убыв), при равенстве — случайный порядок
+    items = list(scores.items())
+    # Перемешиваем, потом стабильно сортируем по баллам
+    random.shuffle(items)
+    items.sort(key=lambda x: -x[1])
+    top1 = items[0][0]
+    top2 = items[1][0]
+    pair = tuple(sorted([top1, top2]))
+    if pair in HYBRIDS:
+        return HYBRIDS[pair]
+    # Заглушка на всякий случай
+    return ("🎭 Загадочный странник", "Ты — тот, кого ещё не описали. Но это ненадолго.")
+
+# ========== ТЕКСТЫ ==========
+WELCOME = """
+🏰 Добро пожаловать в **Рейд Сердец**!
+
+Ты — искатель приключений в мире, где знакомства становятся частью RPG-приключения.
+
+Нажми **"Начать приключение!"**, чтобы узнать свой класс.
+"""
+
+CONSENT_TEXT = f"""
+📄 **Согласие на обработку персональных данных**
+
+Для работы бота мне нужно обрабатывать твои данные: никнейм, возраст, город, «Маяк», Telegram ID.
+
+📍 Данные хранятся на серверах в России (г. Москва).
+🔒 Используется шифрование.
+🗑️ Ты можешь удалить аккаунт командой `/delete_me` в любой момент.
+
+Продолжая, ты соглашаешься с обработкой данных.
+
+[📄 Политика конфиденциальности]({POLICY_URL})
+"""
+
+PROFILE_TEMPLATE = """
+📜 **Твоя анкета**
+
+👤 **Имя:** {username}
+⚔️ **Класс:** {class_name}
+📈 **Уровень:** {level} {progress_bar}
+🎂 **Возраст:** {age}
+🏙️ **Город:** {city}
+🔑 **Маяк:** {mayak_text}
+🚩 **Красные флаги:** {red_flags}
+🏷️ **Теги:**
+{tags}
+🔥 **Стрик:** {daily_streak} дн.
+📊 **Статус:** {status}
+"""
+
+STATUS_NAMES = {"idle": "🟢 Свободен", "searching": "🟡 В поиске", "matched": "🔵 Нашёл пару",
+                "dungeon": "🔴 В приключении"}
+
+# ========== СОСТОЯНИЯ ==========
+class RegForm(StatesGroup):
+    username = State(); age = State(); city = State(); mayak = State()
+    tag_step = State(); red_flags = State()
 
 # ========== ДАНЖИ ==========
 FOREST = {
@@ -316,7 +460,7 @@ FOREST = {
              "bridges": {"same": "Вы идёте к логову. Чем ближе, тем темнее лес. Оборотень молчит.",
                          "soft": "Он ведёт вас потайной тропой. Через час вы видите вход в пещеру. Из неё тянет холодом.",
                          "mixed": "Он говорит: «Я подожду здесь». И садится на камень. Ждёт."}},
-            {"text": "🏡 Вы вернулись в деревню. Жители собрались на площади. Оборотень стоит рядом. Они не знают, кто он.",
+            {"text": "🏡 Вы вернулись в деревню. Жители собрались на площади. Оборотень стоит рядом.",
              "options": [{"text": "Скажу правду — пусть решают", "soft": False},
                          {"text": "Совру, чтобы защитить оборотня", "soft": True},
                          {"text": "Уйду молча — это не моё дело", "soft": True}],
@@ -546,7 +690,7 @@ JUNGLE = {
              "bridges": {"same": "Обезьяны исчезают. Вожак оставляет вам что-то. Камень. Странный.",
                          "soft": "Они уходят в кроны. Сумка остаётся на земле. Целая.",
                          "mixed": "Стая расходится. Одна обезьяна смотрит на вас. Долго. Потом прыгает следом."}},
-            {"text": "💀 Вы нашли тело. Это один из прошлой экспедиции. Рядом — дневник. Он открыт на последней странице.",
+            {"text": "💀 Вы нашли тело. Это один из прошлой экспедиции. Рядом — дневник.",
              "options": [{"text": "Прочитаю дневник", "soft": False},
                          {"text": "Закрою и похороню тело", "soft": True},
                          {"text": "Отдам дневник командиру", "soft": False}],
@@ -747,7 +891,7 @@ CATHEDRAL = {
              "bridges": {"same": "Она садится на трон. «Здесь решается всё».",
                          "soft": "Она говорит: «Ты боишься. Это хорошо. Страх — это честность».",
                          "mixed": "Она поднимает руку. Стены начинают дышать."}},
-            {"text": "🖤 Она говорит: «Я могу сделать одного из вас счастливым на всю жизнь. А другого — несчастным. Кого выбрать?»",
+            {"text": "🖤 Она говорит: «Я могу сделать одного из вас счастливым. А другого — несчастным. Кого выбрать?»",
              "options": [{"text": "Пусть счастлив будет напарник", "soft": True},
                          {"text": "Пусть счастлив буду я", "soft": False},
                          {"text": "Откажусь — мы либо оба, либо никто", "soft": True}],
@@ -836,7 +980,7 @@ VALLEY = {
              "bridges": {"same": "Золото тускнеет. Оно здесь давно. Слишком давно.",
                          "soft": "Вы идёте дальше. Сокровища остаются за спиной. Ждут.",
                          "mixed": "Одна монета падает. Звон идёт по залу. Долго. Слишком долго."}},
-            {"text": "👑 На троне из золота — скелет. В руках — свиток. На свитке — имена всех, кто дошёл.",
+            {"text": "👑 На троне из золота — скелет. В руках — свиток.",
              "options": [{"text": "Прочитаю свиток", "soft": False},
                          {"text": "Оставлю — не хочу знать", "soft": True},
                          {"text": "Спрошу напарника, что он думает", "soft": True}],
@@ -867,67 +1011,6 @@ DUNGEONS = {
     "cathedral": CATHEDRAL, "valley": VALLEY
 }
 
-# ========== ТЕКСТЫ ==========
-WELCOME = """
-🏰 Добро пожаловать в **Рейд Сердец**!
-
-Ты — искатель приключений в мире, где знакомства становятся частью RPG-приключения.
-
-Нажми **"Начать приключение!"**, чтобы узнать свой класс.
-"""
-
-CONSENT_TEXT = f"""
-📄 **Согласие на обработку персональных данных**
-
-Для работы бота мне нужно обрабатывать твои данные: никнейм, возраст, город, «Ключ», Telegram ID.
-
-📍 Данные хранятся на серверах в России (г. Москва).
-🔒 Используется шифрование.
-🗑️ Ты можешь удалить аккаунт командой `/delete_me` в любой момент.
-
-Продолжая, ты соглашаешься с обработкой данных.
-
-[📄 Политика конфиденциальности]({POLICY_URL})
-"""
-
-PROFILE_TEMPLATE = """
-📜 **Твоя анкета**
-
-👤 **Имя:** {username}
-⚔️ **Класс:** {class_name}
-📈 **Уровень:** {level} {progress_bar}
-🎂 **Возраст:** {age}
-🏙️ **Город:** {city}
-🔑 **Ключ:** {key_text}
-🏷️ **Теги:**
-{tags}
-🔥 **Стрик:** {daily_streak} дн.
-📊 **Статус:** {status}
-"""
-
-CLASS_DESCRIPTIONS = {
-    "Рыцарь": "Ты — Рыцарь. Честь и защита слабых — твой путь.",
-    "Тёмный Страж": "Ты — Тёмный Страж. Ты несешь суровую справедливость.",
-    "Варвар": "Ты — Варвар. Сила и интуиция ведут тебя.",
-    "Волшебник": "Ты — Волшебник. Знание — твоя сила.",
-    "Инженер": "Ты — Инженер. Ты чинишь всё, что сломано.",
-    "Бард": "Ты — Бард. Харизма и юмор — твоё оружие.",
-    "Тень": "Ты — Тень. Ты наблюдаешь и действуешь скрытно.",
-    "Следопыт": "Ты — Следопыт. Ты видишь то, что ускользает от других.",
-    "Жрец": "Ты — Жрец. Ты исцеляешь и даришь свет.",
-    "Друид": "Ты — Друид. Ты часть природы и её хранитель."
-}
-
-CLASS_EMOJI = {"Рыцарь": "🗡️", "Тёмный Страж": "💜", "Варвар": "⚔️", "Волшебник": "🧙",
-               "Инженер": "🗝️", "Бард": "🎭", "Тень": "🌙", "Следопыт": "🏹", "Жрец": "🛡️", "Друид": "🌿"}
-
-STATUS_NAMES = {"idle": "🟢 Свободен", "searching": "🟡 В поиске", "matched": "🔵 Нашёл пару",
-                "dungeon": "🔴 В приключении"}
-
-# ========== СОСТОЯНИЯ ==========
-class RegForm(StatesGroup):
-    username = State(); age = State(); city = State(); key_text = State(); tag_step = State()
-
 # ========== БОТ ==========
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties())
 dp = Dispatcher()
@@ -954,6 +1037,37 @@ async def check_daily(user, db):
     user.level = calculate_level(user.experience)
     db.commit()
     return (True, exp_bonus, streak)
+
+# ========== ТАЙМАУТ (ФОНОВАЯ ЗАДАЧА) ==========
+async def timeout_checker():
+    while True:
+        try:
+            await asyncio.sleep(60)
+            with SessionLocal() as db:
+                now = datetime.datetime.utcnow()
+                sessions = db.execute(select(DungeonSession).where(DungeonSession.status == "active")).scalars().all()
+                for s in sessions:
+                    if not s.last_activity:
+                        continue
+                    elapsed = (now - s.last_activity).total_seconds()
+                    if elapsed < TURN_TIMEOUT_SECONDS:
+                        continue
+                    s.status = "finished"
+                    p1 = db.execute(select(User).where(User.tg_id == s.player1_tg_id)).scalar_one_or_none()
+                    p2 = db.execute(select(User).where(User.tg_id == s.player2_tg_id)).scalar_one_or_none()
+                    if p1:
+                        p1.status = "idle"; p1.partner_tg_id = None; p1.is_ready = False
+                    if p2:
+                        p2.status = "idle"; p2.partner_tg_id = None; p2.is_ready = False
+                    db.commit()
+                    text = "⏰ Напарник не ответил. Что-то пошло не так... Вы возвращаетесь в поиск подземелья."
+                    try: await bot.send_message(chat_id=s.player1_tg_id, text=text, reply_markup=main_menu())
+                    except: pass
+                    try: await bot.send_message(chat_id=s.player2_tg_id, text=text, reply_markup=main_menu())
+                    except: pass
+                    print(f"⏰ Таймаут сессии #{s.id}")
+        except Exception as e:
+            print(f"⚠️ timeout_checker error: {e}")
 
 # ========== СТАРТ ==========
 @dp.message(Command("start"))
@@ -995,27 +1109,30 @@ async def consent_no(call: CallbackQuery):
 # ========== КВИЗ ==========
 @dp.callback_query(F.data == "class_start")
 async def start_quiz(call: CallbackQuery, state: FSMContext):
-    await state.update_data(quiz_step=0, scores={})
+    await state.update_data(quiz_step=0, scores={c: 0 for c in ALL_CLASSES})
     await ask_question(call.message, state, 0)
     await call.answer()
 
 async def ask_question(message, state, step):
-    if step >= len(QUESTIONS):
-        await finish_quiz(message, state); return
-    q = QUESTIONS[step]
+    if step >= len(QUIZ):
+        await finish_quiz(message, state)
+        return
+    q = QUIZ[step]
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=t, callback_data=f"q_{step}_{i}")] for i, t in enumerate(q["options"].keys())
+        [InlineKeyboardButton(text=opt[0], callback_data=f"q_{step}_{i}")]
+        for i, opt in enumerate(q["options"])
     ])
-    await message.edit_text(f"📜 Вопрос {step+1} из {len(QUESTIONS)}:\n\n{q['text']}", reply_markup=kb)
+    await message.edit_text(f"📜 Вопрос {step+1} из {len(QUIZ)}:\n\n{q['text']}", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("q_"))
 async def answer_quiz(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    step = int(call.data.split("_")[1]); idx = int(call.data.split("_")[2])
-    q = QUESTIONS[step]; opt_text = list(q["options"].keys())[idx]
-    scores = data.get("scores", {})
-    for cls, pts in q["options"][opt_text].items():
-        scores[cls] = scores.get(cls, 0) + pts
+    parts = call.data.split("_")
+    step = int(parts[1]); idx = int(parts[2])
+    q = QUIZ[step]
+    class_name = q["options"][idx][1]
+    scores = data.get("scores", {c: 0 for c in ALL_CLASSES})
+    scores[class_name] = scores.get(class_name, 0) + 2
     await state.update_data(scores=scores)
     await ask_question(call.message, state, step + 1)
     await call.answer()
@@ -1024,15 +1141,13 @@ async def finish_quiz(message, state):
     data = await state.get_data()
     scores = data.get("scores", {})
     if not scores:
-        await message.edit_text("❌ Ошибка. Попробуй /start заново."); return
-    class_name = max(scores, key=scores.get)
-    class_map = {"Рыцарь": UserClass.RYTSAR, "Тёмный Страж": UserClass.TEMNYI_STRAZH,
-                 "Варвар": UserClass.VARVAR, "Волшебник": UserClass.VOLSHEBNIK,
-                 "Инженер": UserClass.INZHENER, "Бард": UserClass.BARD,
-                 "Тень": UserClass.TEN, "Следопыт": UserClass.SLEDOPYT,
-                 "Жрец": UserClass.ZHRETS, "Друид": UserClass.DRUID}
-    await state.update_data(class_name=class_map.get(class_name, UserClass.RYTSAR))
-    await message.edit_text(f"🎉 Ты — **{CLASS_EMOJI[class_name]} {class_name}**!\n\n{CLASS_DESCRIPTIONS.get(class_name, '')}\n\nТеперь заполни анкету.")
+        await message.edit_text("❌ Ошибка. Попробуй /start заново.")
+        return
+    hybrid_name, hybrid_desc = get_hybrid_class(scores)
+    await state.update_data(class_name=hybrid_name)
+    await message.edit_text(
+        f"🎉 Ты — **{hybrid_name}**!\n\n{hybrid_desc}\n\nТеперь заполни анкету."
+    )
     await message.answer("📝 Введи **никнейм** (2–30 символов):", reply_markup=cancel_kb())
     await state.set_state(RegForm.username)
 
@@ -1063,25 +1178,34 @@ async def set_age(msg: Message, state: FSMContext):
 async def set_city(msg: Message, state: FSMContext):
     await state.update_data(city=msg.text.strip())
     await msg.answer(
-        "🔑 **Ключ** — это то, что ты хочешь сказать о себе другим. До 100 символов.\n\n"
+        "🔑 **Маяк** — это то, что ты хочешь сказать о себе другим. До 100 символов.\n\n"
         "Пример: *«М/25, ищу того, с кем можно обсудить аниме»*\n\n"
-        "Показывается напарнику **только после 1-й фазы** данжа.",
+        "Показывается напарнику **только после 1-й фазы** подземелья.",
         reply_markup=cancel_kb()
     )
-    await state.set_state(RegForm.key_text)
+    await state.set_state(RegForm.mayak)
 
-@dp.message(RegForm.key_text)
-async def set_key(msg: Message, state: FSMContext):
+@dp.message(RegForm.mayak)
+async def set_mayak(msg: Message, state: FSMContext):
     key = msg.text.strip()
     if len(key) < 5 or len(key) > 100:
-        await msg.answer("❌ Ключ от 5 до 100 символов."); return
-    await state.update_data(key_text=key, selected_tags={})
+        await msg.answer("❌ Маяк от 5 до 100 символов."); return
+    await state.update_data(mayak_text=key, selected_tags={})
     await state.set_state(RegForm.tag_step)
     await ask_tag_question(msg, state, 0, msg.from_user.id)
 
 async def ask_tag_question(message, state, step, user_id):
     if step >= len(TAG_QUESTIONS):
-        await finish_registration(message, state, user_id); return
+        # Переходим к красным флагам
+        await state.update_data(selected_flags=[])
+        await message.answer(
+            "🚩 **Красные флаги**\n\n"
+            "Что для тебя стоп-фактор? Выбери **до 3** или нажми «Готово» без выбора.\n\n"
+            "Показывается напарнику вместе с Маяком.",
+            reply_markup=red_flags_kb([])
+        )
+        await state.set_state(RegForm.red_flags)
+        return
     q_data = TAG_QUESTIONS[step]
     kb = tag_question_kb(q_data["tags"], step)
     await message.answer(f"{q_data['question']}\n\nВыбери один вариант:", reply_markup=kb)
@@ -1096,10 +1220,35 @@ async def handle_tag_answer(call: CallbackQuery, state: FSMContext):
     selected[q_data["category"]] = q_data["tags"][tag_idx]
     await state.update_data(selected_tags=selected)
     next_step = step + 1
-    if next_step >= len(TAG_QUESTIONS):
+    await ask_tag_question(call.message, state, next_step, call.from_user.id)
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("rf_"))
+async def handle_red_flag(call: CallbackQuery, state: FSMContext):
+    action = call.data.split("_")[1]
+    data = await state.get_data()
+    selected = data.get("selected_flags", [])
+    if action == "done":
+        if selected:
+            flags_text = ", ".join([RED_FLAGS[i] for i in selected])
+        else:
+            flags_text = "Не указано"
+        await state.update_data(red_flags_text=flags_text)
         await finish_registration(call.message, state, call.from_user.id)
+        await call.answer()
+        return
+    idx = int(action)
+    if idx in selected:
+        selected.remove(idx)
     else:
-        await ask_tag_question(call.message, state, next_step, call.from_user.id)
+        if len(selected) >= 3:
+            await call.answer("❌ Максимум 3", show_alert=True)
+            return
+        selected.append(idx)
+    await state.update_data(selected_flags=selected)
+    try:
+        await call.message.edit_reply_markup(reply_markup=red_flags_kb(selected))
+    except: pass
     await call.answer()
 
 async def finish_registration(message, state, user_id):
@@ -1111,7 +1260,8 @@ async def finish_registration(message, state, user_id):
         if db.execute(select(User).where(User.tg_id == user_id)).scalar_one_or_none():
             await message.answer("❌ Ты уже зарегистрирован!"); return
         user = User(tg_id=user_id, username=data["username"], class_name=data["class_name"],
-                    age=data["age"], city=data["city"], key_text=data["key_text"],
+                    age=data["age"], city=data["city"], mayak_text=data["mayak_text"],
+                    red_flags=data.get("red_flags_text", "Не указано"),
                     status="idle", consent_given=True)
         db.add(user); db.flush()
         for category, tag in selected_tags.items():
@@ -1144,12 +1294,13 @@ async def profile(call: CallbackQuery):
         await call.message.edit_text(
             PROFILE_TEMPLATE.format(
                 username=user.username,
-                class_name=f"{CLASS_EMOJI.get(user.class_name.value, '')} {user.class_name.value}",
+                class_name=user.class_name,
                 level=user.level,
                 progress_bar=bar,
                 age=user.age or "Не указан",
                 city=user.city or "Не указан",
-                key_text=user.key_text or "Не указан",
+                mayak_text=user.mayak_text or "Не указан",
+                red_flags=user.red_flags or "Не указано",
                 tags=tags_text,
                 daily_streak=user.daily_streak or 0,
                 status=STATUS_NAMES.get(user.status, user.status)
@@ -1160,7 +1311,7 @@ async def profile(call: CallbackQuery):
 @dp.callback_query(F.data == "edit_profile")
 async def edit_profile(call: CallbackQuery):
     await call.message.edit_text(
-        "📝 Редактирование:\n/setname Имя\n/setage 25\n/setcity Москва\n/setkey Твой ключ",
+        "📝 Редактирование:\n/setname Имя\n/setage 25\n/setcity Москва\n/setmayak Текст\n/setflags",
         reply_markup=main_menu())
     await call.answer()
 
@@ -1200,14 +1351,14 @@ async def find_match(call: CallbackQuery):
         my_tags_text = "\n".join([f"• {t.tag}" for t in my_tags_raw])
         await call.message.answer(
             f"🎉 **Найден напарник!**\n\n👤 **{best_match.username}**\n"
-            f"{CLASS_EMOJI[best_match.class_name.value]} Класс: {best_match.class_name.value}\n"
+            f"⚔️ Класс: {best_match.class_name}\n"
             f"🎂 Возраст: {best_match.age}\n🏙️ Город: {best_match.city}\n"
             f"🏷️ **Общих тегов: {best_score}**\n{partner_tags_text}\n\nГотов отправиться?",
             reply_markup=ready_kb())
         try:
             await bot.send_message(chat_id=best_match.tg_id, text=(
                 f"🎉 **Найден напарник!**\n\n👤 **{user.username}**\n"
-                f"{CLASS_EMOJI[user.class_name.value]} Класс: {user.class_name.value}\n"
+                f"⚔️ Класс: {user.class_name}\n"
                 f"🎂 Возраст: {user.age}\n🏙️ Город: {user.city}\n"
                 f"🏷️ **Общих тегов: {best_score}**\n{my_tags_text}\n\nГотов отправиться?"
             ), reply_markup=ready_kb())
@@ -1229,12 +1380,13 @@ async def ready_handler(call: CallbackQuery):
         user.status = "dungeon"; partner.status = "dungeon"
         theme_key = random.choice(list(DUNGEONS.keys()))
         session = DungeonSession(player1_tg_id=user.tg_id, player2_tg_id=partner.tg_id,
-                                 theme_key=theme_key, current_phase=1, current_question=0, status="active")
+                                 theme_key=theme_key, current_phase=1, current_question=0,
+                                 status="active", last_activity=datetime.datetime.utcnow())
         db.add(session); db.commit()
         theme = DUNGEONS[theme_key]
         q = theme["phases"][0]["questions"][0]
         total_q = len(theme["phases"][0]["questions"])
-        intro = (f"🎲 **Тема: {theme['name']}**\n"
+        intro = (f"🎲 **Подземелье: {theme['name']}**\n"
                  f"📍 Фаза 1/3 — {theme['phases'][0]['name']}\n"
                  f"📊 Вопрос 1/{total_q}\n\n{q['text']}")
         kb = dungeon_answer_kb(theme_key, 0, 0)
@@ -1242,26 +1394,7 @@ async def ready_handler(call: CallbackQuery):
         except Exception: await call.message.answer(intro, reply_markup=kb)
         try: await bot.send_message(chat_id=partner.tg_id, text=intro, reply_markup=kb)
         except Exception as e: print(f"⚠️ {e}")
-        asyncio.create_task(dungeon_timeout(session.id, 0))
     await call.answer()
-
-async def dungeon_timeout(session_id, question_idx):
-    await asyncio.sleep(300)
-    with SessionLocal() as db:
-        session = db.execute(select(DungeonSession).where(DungeonSession.id == session_id)).scalar_one_or_none()
-        if not session or session.status != "active": return
-        if session.current_question != question_idx: return
-        session.status = "finished"
-        p1 = db.execute(select(User).where(User.tg_id == session.player1_tg_id)).scalar_one_or_none()
-        p2 = db.execute(select(User).where(User.tg_id == session.player2_tg_id)).scalar_one_or_none()
-        if p1: p1.status = "idle"; p1.partner_tg_id = None; p1.is_ready = False
-        if p2: p2.status = "idle"; p2.partner_tg_id = None; p2.is_ready = False
-        db.commit()
-        text = "⏰ Напарник не ответил. Что-то пошло не так... Вы возвращаетесь в поиск подземелья."
-        try: await bot.send_message(chat_id=session.player1_tg_id, text=text, reply_markup=main_menu())
-        except: pass
-        try: await bot.send_message(chat_id=session.player2_tg_id, text=text, reply_markup=main_menu())
-        except: pass
 
 # ========== ОТВЕТЫ В ДАНЖЕ ==========
 @dp.callback_query(F.data.startswith("da_"))
@@ -1284,6 +1417,7 @@ async def dungeon_answer(call: CallbackQuery):
         else:
             if session.player2_ready: await call.answer("✅ Уже ответил", show_alert=True); return
             session.player2_answer = ans_idx; session.player2_ready = True
+        session.last_activity = datetime.datetime.utcnow()
         db.commit()
         q = DUNGEONS[theme_key]["phases"][phase_idx]["questions"][q_idx]
         await call.message.edit_text(f"✅ Твой выбор: **{q['options'][ans_idx]['text']}**\n\n⏳ Ждём напарника...")
@@ -1311,6 +1445,7 @@ async def process_question(db, session, theme_key, phase_idx, q_idx):
     session.player1_ready = False; session.player2_ready = False
     session.player1_answer = None; session.player2_answer = None
     session.current_question += 1
+    session.last_activity = datetime.datetime.utcnow()
     theme = DUNGEONS[theme_key]; phase = theme["phases"][phase_idx]
     total_q = len(phase["questions"])
     if session.current_question >= total_q:
@@ -1356,9 +1491,13 @@ async def send_end_of_phase_1(session, theme_key, bridge):
         p1 = db.execute(select(User).where(User.tg_id == session.player1_tg_id)).scalar_one_or_none()
         p2 = db.execute(select(User).where(User.tg_id == session.player2_tg_id)).scalar_one_or_none()
         text_to_p1 = (f"{bridge}\n\n🏁 **Фаза 1 пройдена!**\n\n"
-                      f"🔑 **Ключ напарника:**\n_{p2.key_text if p2 else 'не указан'}_\n\nГотов продолжить?")
+                      f"🔑 **Маяк напарника:**\n_{p2.mayak_text if p2 else 'не указан'}_\n\n"
+                      f"🚩 **Красные флаги:**\n_{p2.red_flags if p2 and p2.red_flags else 'не указано'}_\n\n"
+                      f"Готов продолжить?")
         text_to_p2 = (f"{bridge}\n\n🏁 **Фаза 1 пройдена!**\n\n"
-                      f"🔑 **Ключ напарника:**\n_{p1.key_text if p1 else 'не указан'}_\n\nГотов продолжить?")
+                      f"🔑 **Маяк напарника:**\n_{p1.mayak_text if p1 else 'не указан'}_\n\n"
+                      f"🚩 **Красные флаги:**\n_{p1.red_flags if p1 and p1.red_flags else 'не указано'}_\n\n"
+                      f"Готов продолжить?")
         try: await bot.send_message(chat_id=session.player1_tg_id, text=text_to_p1, reply_markup=continue_kb())
         except: pass
         try: await bot.send_message(chat_id=session.player2_tg_id, text=text_to_p2, reply_markup=continue_kb())
@@ -1389,8 +1528,8 @@ async def send_final(session, p1, p2, theme_key, exp_gain):
     if percent >= 50 and p1 and p2:
         contacts = f"\n\n📞 **Держите связь:**\n• {p1.username}\n• {p2.username}\n\nНапишите друг другу!"
     else:
-        contacts = "\n\n💭 Если захотите — попробуйте пройти другой данж вместе."
-    final_text = (f"🏁 **Данж завершён!**\n\n"
+        contacts = "\n\n💭 Если захотите — попробуйте пройти другое подземелье вместе."
+    final_text = (f"🏁 **Приключение завершено!**\n\n"
                   f"💫 Синхрон: **{percent}%**\n"
                   f"✅ Совпадений: **{matches} из {total}**\n"
                   f"⭐ Опыт: **+{exp_gain}**\n\n"
@@ -1428,6 +1567,7 @@ async def handle_text_message(msg: Message, state: FSMContext):
         else:
             session.player2_msg = text; partner_id = session.player1_tg_id
         session.msg_stage += 1
+        session.last_activity = datetime.datetime.utcnow()
         db.commit()
         await msg.answer("✅ Сообщение отправлено напарнику.")
         try: await bot.send_message(chat_id=partner_id, text=f"💬 **Сообщение от напарника:**\n\n_{text}_")
@@ -1451,6 +1591,7 @@ async def dungeon_continue(call: CallbackQuery):
             ((DungeonSession.player1_tg_id == user.tg_id) | (DungeonSession.player2_tg_id == user.tg_id))
         )).scalars().first()
         if not session: await call.answer("❌ Сессия не найдена", show_alert=True); return
+        session.last_activity = datetime.datetime.utcnow()
         if session.current_phase == 1 and session.current_question >= len(DUNGEONS[session.theme_key]["phases"][0]["questions"]):
             session.current_phase = 2; session.current_question = 0
             session.player1_ready = False; session.player2_ready = False
@@ -1569,16 +1710,24 @@ async def setcity(msg: Message):
         user.city = city; db.commit()
         await msg.answer(f"✅ Город: {city}")
 
-@dp.message(Command("setkey"))
-async def setkey(msg: Message):
-    key = msg.text.replace("/setkey", "").strip()
+@dp.message(Command("setmayak"))
+async def setmayak(msg: Message):
+    key = msg.text.replace("/setmayak", "").strip()
     if not key or len(key) < 5 or len(key) > 100:
-        await msg.answer("❌ Ключ от 5 до 100 символов."); return
+        await msg.answer("❌ Маяк от 5 до 100 символов."); return
     with SessionLocal() as db:
         user = db.execute(select(User).where(User.tg_id == msg.from_user.id)).scalar_one_or_none()
         if not user: await msg.answer("❌ Не зарегистрирован!"); return
-        user.key_text = key; db.commit()
-        await msg.answer("✅ Ключ обновлён!")
+        user.mayak_text = key; db.commit()
+        await msg.answer("✅ Маяк обновлён!")
+
+@dp.message(Command("setflags"))
+async def setflags(msg: Message):
+    await msg.answer(
+        "🚩 Чтобы изменить красные флаги — напиши в формате:\n\n"
+        "`/setflags Курение, Алкоголь`\n\n"
+        "Доступные варианты:\n" + "\n".join(RED_FLAGS)
+    )
 
 @dp.message(Command("reset"))
 async def reset_status(msg: Message):
@@ -1637,6 +1786,7 @@ async def main():
             u.status = "idle"; u.partner_tg_id = None; u.is_ready = False
         db.commit()
         print(f"🧹 Сброшено зависших статусов: {len(stuck)}")
+    asyncio.create_task(timeout_checker())
     print("✅ База данных готова!")
     print("🚀 Бот 'Рейд Сердец' запущен!")
     await dp.start_polling(bot)
