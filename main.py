@@ -88,7 +88,6 @@ class DungeonSession(Base):
     last_activity = Column(DateTime, default=datetime.datetime.utcnow)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
-# Base.metadata.drop_all(engine)
 # Base.metadata.create_all(engine)
 
 # ========== УРОВНИ ==========
